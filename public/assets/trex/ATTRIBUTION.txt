@@ -1,0 +1,6 @@
+T-Rex 3D model
+Source: Poly Pizza, https://poly.pizza/m/9GyZw9gGPMq
+Creator: Poly by Google
+License: Creative Commons Attribution 3.0, https://creativecommons.org/licenses/by/3.0/
+
+The game loads the model from public/assets/trex/poly-pizza-google-trex.glb and applies runtime scale, motion, and color tinting.
