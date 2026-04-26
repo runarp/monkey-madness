@@ -27,6 +27,10 @@ button {
   font: inherit;
 }
 
+input {
+  font: inherit;
+}
+
 .game-shell {
   position: relative;
   width: 100vw;
@@ -65,7 +69,7 @@ button {
 
 .stat-panel {
   display: grid;
-  grid-template-columns: repeat(7, minmax(66px, max-content));
+  grid-template-columns: repeat(10, minmax(66px, max-content));
   gap: 2px;
   padding: 8px;
 }
@@ -125,6 +129,81 @@ button {
   outline-offset: 2px;
 }
 
+.leaderboard-panel {
+  position: absolute;
+  top: max(74px, calc(env(safe-area-inset-top) + 74px));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 4;
+  width: min(292px, calc(100vw - 28px));
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  color: #f8faf5;
+  background: rgba(34, 50, 38, 0.64);
+  box-shadow: 0 14px 40px rgba(14, 31, 30, 0.22);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+
+.leaderboard-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: #fff7db;
+}
+
+.leaderboard-title strong {
+  font-size: 0.86rem;
+  line-height: 1.1;
+}
+
+.leaderboard-empty {
+  margin: 0;
+  color: rgba(232, 242, 219, 0.74);
+  font-size: 0.78rem;
+}
+
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.leaderboard-table th,
+.leaderboard-table td {
+  padding: 5px 4px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.78rem;
+  line-height: 1.15;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-table th {
+  color: rgba(232, 242, 219, 0.68);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.leaderboard-table th:nth-child(1),
+.leaderboard-table td:nth-child(1) {
+  width: 28px;
+  text-align: left;
+}
+
+.leaderboard-table th:nth-child(2),
+.leaderboard-table td:nth-child(2) {
+  width: 42%;
+  text-align: left;
+}
+
+.leaderboard-table tr + tr td {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .touch-joystick {
   position: absolute;
   left: max(18px, env(safe-area-inset-left));
@@ -173,9 +252,10 @@ button {
   bottom: max(28px, env(safe-area-inset-bottom));
   z-index: 6;
   display: grid;
-  gap: 2px;
-  min-width: min(360px, calc(100vw - 32px));
-  padding: 14px 18px;
+  gap: 10px;
+  min-width: min(420px, calc(100vw - 32px));
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 18px;
   transform: translateX(-50%);
   border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 8px;
@@ -184,7 +264,7 @@ button {
   background: rgba(37, 54, 41, 0.74);
   box-shadow: 0 18px 44px rgba(14, 31, 30, 0.26);
   backdrop-filter: blur(12px);
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .end-panel strong {
@@ -201,6 +281,111 @@ button {
 .end-panel.danger {
   color: #fff0e8;
   background: rgba(83, 35, 30, 0.78);
+}
+
+.run-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.run-summary div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.run-summary span {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 0.68rem;
+}
+
+.run-summary strong {
+  display: block;
+  overflow: hidden;
+  font-size: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-form {
+  display: grid;
+  gap: 6px;
+  text-align: left;
+}
+
+.score-form label {
+  color: rgba(232, 242, 219, 0.78);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.score-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.score-form input {
+  min-width: 0;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(15, 27, 25, 0.48);
+}
+
+.score-form input:focus-visible {
+  outline: 2px solid #ffdf6f;
+  outline-offset: 2px;
+}
+
+.primary-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 8px;
+  color: #253321;
+  background: #ffe174;
+  box-shadow:
+    inset 0 -8px 14px rgba(128, 84, 21, 0.18),
+    0 12px 26px rgba(14, 31, 30, 0.18);
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  background: #fff0a3;
+}
+
+.primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary-button:focus-visible {
+  outline: 2px solid #fff7db;
+  outline-offset: 2px;
+}
+
+.restart-button {
+  width: 100%;
+}
+
+.end-leaderboard {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.end-leaderboard .leaderboard-title {
+  margin-bottom: 2px;
 }
 
 @media (pointer: coarse) {
@@ -232,5 +417,36 @@ button {
   .icon-button {
     width: 38px;
     height: 38px;
+  }
+
+  .leaderboard-panel {
+    top: auto;
+    right: max(14px, env(safe-area-inset-right));
+    bottom: max(154px, calc(env(safe-area-inset-bottom) + 154px));
+    width: min(224px, calc(100vw - 158px));
+    padding: 8px 10px 10px;
+  }
+
+  .leaderboard-table th,
+  .leaderboard-table td {
+    padding: 4px 3px;
+    font-size: 0.72rem;
+  }
+
+  .leaderboard-table th {
+    font-size: 0.64rem;
+  }
+
+  .end-panel {
+    gap: 8px;
+    padding: 14px;
+  }
+
+  .run-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .score-form-row {
+    grid-template-columns: 1fr;
   }
 }

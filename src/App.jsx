@@ -1,6 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber';
-import { Pause, Play, RotateCcw } from 'lucide-react';
+import { Pause, Play, RotateCcw, Save, Trophy } from 'lucide-react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -18,6 +18,13 @@ const MAX_SPAWN_MULTIPLIER = 20;
 const MAX_RIVAL_REX_COUNT = 6;
 const FINAL_GLOBE_SIZE = 620;
 const MAX_SCENERY_EATS_PER_FRAME = 1;
+const ENTITY_GROWTH_CAP_RATIO = 0.045;
+const SCENERY_GROWTH_CAP_RATIO = 0.045;
+const SPAWN_EDIBLE_SIZE_RATIO = 0.9;
+const LEADERBOARD_STORAGE_KEY = 'monkey-madness:top-scores:v1';
+const LAST_PLAYER_NAME_KEY = 'monkey-madness:last-player-name';
+const MAX_LEADERBOARD_ENTRIES = 8;
+const MAX_PLAYER_NAME_LENGTH = 14;
 const GLOBE_RADIUS = 8200;
 const GLOBE_WORLD_LIMIT = GLOBE_RADIUS * 0.92;
 const CAMERA_ZOOM_MIN = 0.42;
@@ -109,7 +116,7 @@ const getTargetEntityCount = (spawnMultiplier = DEFAULT_SPAWN_MULTIPLIER) => Mat
 const getVisualSize = (size) => {
   const safeSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(size));
   if (safeSize <= 60) return safeSize;
-  return Math.min(MAX_VISUAL_SIZE, 60 + Math.log1p(safeSize - 60) * 92);
+  return Math.min(MAX_VISUAL_SIZE, 60 + Math.sqrt(safeSize - 60) * 9.5);
 };
 
 const getRelativeVisualSize = (size, referenceSize) => {
@@ -194,19 +201,70 @@ const addCappedGrowth = (size, amount, ratio = 0.035, minimum = 0.25) => {
   return addGrowth(safeSize, Math.min(Math.max(0, safeNumber(amount, 0)), Math.max(minimum, safeSize * ratio)));
 };
 
+const getGrowthCapRatio = (size) => {
+  const safeSize = Math.max(START_SIZE, safeNumber(size));
+  if (safeSize < WORLD_PHASES[1].minSize) return ENTITY_GROWTH_CAP_RATIO;
+  if (safeSize < WORLD_PHASES[2].minSize) return 0.035;
+  if (safeSize < WORLD_PHASES[3].minSize) return 0.026;
+  if (safeSize < WORLD_PHASES[4].minSize) return 0.018;
+  return 0.014;
+};
+
+const getSpawnEdibleSizeRatio = (playerSize) => {
+  const safeSize = Math.max(START_SIZE, safeNumber(playerSize));
+  if (safeSize < WORLD_PHASES[1].minSize) return SPAWN_EDIBLE_SIZE_RATIO;
+  if (safeSize < WORLD_PHASES[2].minSize) return 0.86;
+  if (safeSize < WORLD_PHASES[3].minSize) return 0.8;
+  return 0.74;
+};
+
+const getSceneryEatCooldown = (kind, playerSize) => {
+  const phase = getWorldPhase(playerSize);
+  if (kind === 'mountain') return phase >= 3 ? 0.82 : 0.68;
+  if (kind === 'tower') return phase >= 3 ? 0.64 : 0.5;
+  if (kind === 'building') return phase >= 3 ? 0.52 : 0.42;
+  if (kind === 'house' || kind === 'tank') return 0.28;
+  return 0.16;
+};
+
+const getEatScore = (kind, targetSize, eaterSize, growth = 0) => {
+  const kindBonus = {
+    ant: 4,
+    worm: 5,
+    flower: 6,
+    brush: 7,
+    signpost: 8,
+    banana: 9,
+    sapling: 11,
+    monkey: 14,
+    tree: 18,
+    car: 24,
+    house: 32,
+    tank: 38,
+    building: 52,
+    tower: 64,
+    mountain: 85,
+    rival: 120,
+  }[kind] ?? 10;
+  const sizeScore = Math.sqrt(Math.max(MIN_LOGICAL_SIZE, safeNumber(targetSize))) * 18;
+  const growthScore = Math.max(0, safeNumber(growth, 0)) * 95;
+  const phaseScore = getWorldPhase(eaterSize) * 22;
+  return Math.max(1, Math.round(kindBonus + sizeScore + growthScore + phaseScore));
+};
+
 const getSceneryGrowth = (object, playerSize) => {
   const safeSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize));
   const kindMultiplier = {
-    tree: 0.28,
-    house: 0.42,
-    car: 0.22,
-    tank: 0.38,
-    building: 0.34,
-    tower: 0.26,
-    mountain: 0.48,
+    tree: 0.68,
+    house: 0.72,
+    car: 0.52,
+    tank: 0.62,
+    building: 0.58,
+    tower: 0.48,
+    mountain: 0.82,
   }[object.kind] ?? 0.3;
   const rawGrowth = Math.max(0.01, safeNumber(object.growth, 0.2) * kindMultiplier);
-  const perObjectCap = Math.max(0.018, safeSize * 0.006);
+  const perObjectCap = Math.max(0.05, safeSize * Math.min(SCENERY_GROWTH_CAP_RATIO, getGrowthCapRatio(safeSize)));
   return Math.min(rawGrowth, perObjectCap);
 };
 
@@ -214,7 +272,7 @@ const getEntityGrowth = (entity, eaterSize) => {
   const safeEaterSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(eaterSize));
   const multiplier = ['ant', 'worm'].includes(entity.kind) ? 0.42 : ['flower', 'brush', 'signpost'].includes(entity.kind) ? 0.34 : 0.24;
   const rawGrowth = Math.max(0.006, entity.size * multiplier);
-  return Math.min(rawGrowth, Math.max(0.01, safeEaterSize * 0.01));
+  return Math.min(rawGrowth, Math.max(0.014, safeEaterSize * getGrowthCapRatio(safeEaterSize)));
 };
 
 const getRivalMoveSpeed = (size, phase = 0) => getMoveSpeed(size, phase) * (0.58 + clamp(phase, 0, MAX_WORLD_PHASE) * 0.035);
@@ -238,6 +296,69 @@ const formatMagnitude = (value, digits = 2) => {
 
   return `${(safeValue / 10 ** exponent).toFixed(2)}e${exponent}`;
 };
+
+const formatScore = (value) => {
+  const safeValue = Math.max(0, Math.round(safeNumber(value, 0)));
+  if (safeValue < 1000) return `${safeValue}`;
+  return formatMagnitude(safeValue, 1);
+};
+
+const formatDuration = (seconds) => {
+  const safeSeconds = Math.max(0, Math.floor(safeNumber(seconds, 0)));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${paddedSeconds}`;
+  return `${minutes}:${paddedSeconds}`;
+};
+
+const sanitizePlayerName = (name) => {
+  const trimmed = String(name ?? '').trim().replace(/\s+/g, ' ');
+  return trimmed.slice(0, MAX_PLAYER_NAME_LENGTH);
+};
+
+const rankLeaderboard = (entries) =>
+  [...entries]
+    .filter((entry) => Number.isFinite(entry.points) && Number.isFinite(entry.durationSeconds))
+    .sort((left, right) => right.points - left.points || left.durationSeconds - right.durationSeconds || (right.completedAt ?? '').localeCompare(left.completedAt ?? ''))
+    .slice(0, MAX_LEADERBOARD_ENTRIES);
+
+const loadLeaderboard = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(LEADERBOARD_STORAGE_KEY) ?? '[]');
+    return rankLeaderboard(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return [];
+  }
+};
+
+const saveLeaderboard = (entries) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(rankLeaderboard(entries)));
+};
+
+const loadLastPlayerName = () => {
+  if (typeof window === 'undefined') return '';
+  return sanitizePlayerName(window.localStorage.getItem(LAST_PLAYER_NAME_KEY) ?? '');
+};
+
+const saveLastPlayerName = (name) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(LAST_PLAYER_NAME_KEY, name);
+};
+
+const getPlayerSummary = (player) => ({
+  points: Math.round(safeNumber(player.score, 0)),
+  durationSeconds: safeNumber(player.elapsedSeconds, 0),
+  size: safeNumber(player.size),
+  snacks: player.bananas,
+  critters: player.monkeys,
+  objects: player.objects,
+  eaten: player.eaten,
+  world: getPhaseLabel(getWorldPhase(player.size)),
+});
 
 const getRequestedStartSize = () => {
   if (typeof window === 'undefined') return START_SIZE;
@@ -342,48 +463,202 @@ const findPhaseSpawnPosition = (phase, seed, origin = new THREE.Vector3(), minRa
 
 const randomRange = (min, max) => min + Math.random() * (max - min);
 
-const ENTITY_CATALOG_BY_PHASE = [
-  [
-    { kind: 'ant', size: 0.08, weight: 8 },
-    { kind: 'worm', size: 0.12, weight: 7 },
-    { kind: 'flower', size: 0.2, weight: 5 },
-    { kind: 'brush', size: 0.3, weight: 3 },
-    { kind: 'signpost', size: 0.42, weight: 1 },
-  ],
-  [
-    { kind: 'flower', size: 0.22, weight: 5 },
-    { kind: 'brush', size: 0.36, weight: 6 },
-    { kind: 'signpost', size: 0.55, weight: 5 },
-    { kind: 'banana', size: 0.7, weight: 3 },
-    { kind: 'sapling', size: 0.95, weight: 2 },
-  ],
-  [
-    { kind: 'car', size: 3.4, weight: 5 },
-    { kind: 'tree', size: 4.8, weight: 5 },
-    { kind: 'house', size: 8.6, weight: 3 },
-    { kind: 'tank', size: 10.5, weight: 1 },
-  ],
-  [
-    { kind: 'house', size: 8.6, weight: 3 },
-    { kind: 'building', size: 28, weight: 5 },
-    { kind: 'tower', size: 42, weight: 3 },
-    { kind: 'mountain', size: 86, weight: 2 },
-  ],
-  [
-    { kind: 'building', size: 30, weight: 4 },
-    { kind: 'tower', size: 44, weight: 3 },
-    { kind: 'mountain', size: 96, weight: 4 },
-  ],
+const ENTITY_PROGRESSION_STAGES = [
+  {
+    label: 'Worm Trail',
+    minSize: START_SIZE,
+    catalog: [
+      { kind: 'ant', size: 0.08, weight: 8 },
+      { kind: 'worm', size: 0.12, weight: 7 },
+      { kind: 'flower', size: 0.2, weight: 5 },
+      { kind: 'brush', size: 0.3, weight: 3 },
+      { kind: 'signpost', size: 0.34, weight: 2 },
+    ],
+  },
+  {
+    label: 'Garden Snacks',
+    minSize: 0.55,
+    catalog: [
+      { kind: 'flower', size: 0.24, weight: 4 },
+      { kind: 'brush', size: 0.4, weight: 5 },
+      { kind: 'signpost', size: 0.48, weight: 5 },
+      { kind: 'banana', size: 0.5, weight: 4 },
+      { kind: 'sapling', size: 0.52, weight: 2 },
+    ],
+  },
+  {
+    label: 'Sapling Grove',
+    minSize: 0.85,
+    catalog: [
+      { kind: 'brush', size: 0.55, weight: 3 },
+      { kind: 'signpost', size: 0.68, weight: 4 },
+      { kind: 'banana', size: 0.72, weight: 4 },
+      { kind: 'sapling', size: 0.76, weight: 5 },
+      { kind: 'monkey', size: 0.78, weight: 3 },
+    ],
+  },
+  {
+    label: 'Monkey Grove',
+    minSize: 1.25,
+    catalog: [
+      { kind: 'banana', size: 0.86, weight: 3 },
+      { kind: 'sapling', size: 1.02, weight: 5 },
+      { kind: 'monkey', size: 1.08, weight: 5 },
+      { kind: 'tree', size: 1.12, weight: 4 },
+      { kind: 'car', size: 1.16, weight: 1 },
+    ],
+  },
+  {
+    label: 'Little Trees',
+    minSize: 2,
+    catalog: [
+      { kind: 'sapling', size: 1.35, weight: 3 },
+      { kind: 'monkey', size: 1.58, weight: 3 },
+      { kind: 'tree', size: 1.76, weight: 6 },
+      { kind: 'car', size: 1.84, weight: 4 },
+      { kind: 'house', size: 1.88, weight: 1 },
+    ],
+  },
+  {
+    label: 'Town Edge',
+    minSize: 3.5,
+    catalog: [
+      { kind: 'tree', size: 2.8, weight: 4 },
+      { kind: 'car', size: 3.05, weight: 6 },
+      { kind: 'house', size: 3.18, weight: 5 },
+      { kind: 'tank', size: 3.22, weight: 2 },
+      { kind: 'building', size: 3.28, weight: 1 },
+    ],
+  },
+  {
+    label: 'Town Core',
+    minSize: 5.5,
+    catalog: [
+      { kind: 'car', size: 4.3, weight: 3 },
+      { kind: 'tree', size: 4.5, weight: 3 },
+      { kind: 'house', size: 4.9, weight: 6 },
+      { kind: 'tank', size: 5.0, weight: 4 },
+      { kind: 'building', size: 5.1, weight: 2 },
+    ],
+  },
+  {
+    label: 'City Blocks',
+    minSize: 8.5,
+    catalog: [
+      { kind: 'house', size: 7.0, weight: 4 },
+      { kind: 'tank', size: 7.5, weight: 4 },
+      { kind: 'building', size: 7.7, weight: 7 },
+      { kind: 'tower', size: 7.9, weight: 4 },
+    ],
+  },
+  {
+    label: 'Skyline',
+    minSize: 13,
+    catalog: [
+      { kind: 'house', size: 10.3, weight: 2 },
+      { kind: 'tank', size: 11.2, weight: 3 },
+      { kind: 'building', size: 11.8, weight: 8 },
+      { kind: 'tower', size: 12.1, weight: 6 },
+    ],
+  },
+  {
+    label: 'Continental Scale',
+    minSize: 18,
+    catalog: [
+      { kind: 'tank', size: 14.5, weight: 2 },
+      { kind: 'building', size: 16.2, weight: 8 },
+      { kind: 'tower', size: 16.7, weight: 7 },
+    ],
+  },
+  {
+    label: 'Mountain Line',
+    minSize: 28,
+    catalog: [
+      { kind: 'building', size: 24.5, weight: 7 },
+      { kind: 'tower', size: 25.6, weight: 8 },
+      { kind: 'tank', size: 26.0, weight: 2 },
+    ],
+  },
+  {
+    label: 'Range Runner',
+    minSize: 44,
+    catalog: [
+      { kind: 'building', size: 37.5, weight: 5 },
+      { kind: 'tower', size: 39.5, weight: 6 },
+      { kind: 'mountain', size: 41.0, weight: 3 },
+    ],
+  },
+  {
+    label: 'Planet Approach',
+    minSize: 72,
+    catalog: [
+      { kind: 'building', size: 58, weight: 5 },
+      { kind: 'tower', size: 64, weight: 6 },
+      { kind: 'mountain', size: 67, weight: 4 },
+    ],
+  },
+  {
+    label: 'Planet Giants',
+    minSize: 110,
+    catalog: [
+      { kind: 'building', size: 92, weight: 4 },
+      { kind: 'tower', size: 99, weight: 5 },
+      { kind: 'mountain', size: 103, weight: 8 },
+    ],
+  },
+  {
+    label: 'Globe Ramp',
+    minSize: 160,
+    catalog: [
+      { kind: 'building', size: 134, weight: 4 },
+      { kind: 'tower', size: 144, weight: 5 },
+      { kind: 'mountain', size: 150, weight: 8 },
+    ],
+  },
+  {
+    label: 'Globe Surface',
+    minSize: 220,
+    catalog: [
+      { kind: 'building', size: 184, weight: 4 },
+      { kind: 'tower', size: 198, weight: 5 },
+      { kind: 'mountain', size: 206, weight: 8 },
+    ],
+  },
+  {
+    label: 'Endgame',
+    minSize: 320,
+    catalog: [
+      { kind: 'building', size: 270, weight: 4 },
+      { kind: 'tower', size: 290, weight: 5 },
+      { kind: 'mountain', size: 300, weight: 8 },
+    ],
+  },
+  {
+    label: 'Final Feast',
+    minSize: 460,
+    catalog: [
+      { kind: 'building', size: 388, weight: 4 },
+      { kind: 'tower', size: 414, weight: 5 },
+      { kind: 'mountain', size: 430, weight: 8 },
+    ],
+  },
 ];
 
 const MOVING_ENTITY_KINDS = new Set(['ant', 'worm', 'monkey']);
 const CRITTER_ENTITY_KINDS = new Set(['ant', 'worm', 'monkey']);
 const FLOATING_ENTITY_KINDS = new Set(['banana']);
 
-const getEntityCatalogForPhase = (phase) => ENTITY_CATALOG_BY_PHASE[clamp(phase, 0, MAX_WORLD_PHASE)] ?? ENTITY_CATALOG_BY_PHASE[0];
+const getEntityProgressionStage = (playerSize) => {
+  const safeSize = Math.max(START_SIZE, safeNumber(playerSize));
+  let stage = ENTITY_PROGRESSION_STAGES[0];
+  for (const candidate of ENTITY_PROGRESSION_STAGES) {
+    if (safeSize >= candidate.minSize) stage = candidate;
+  }
+  return stage;
+};
 
-const pickEntityDefinition = (phase) => {
-  const catalog = getEntityCatalogForPhase(phase);
+const pickEntityDefinition = (playerSize) => {
+  const catalog = getEntityProgressionStage(playerSize).catalog;
   const total = catalog.reduce((sum, item) => sum + item.weight, 0);
   let roll = Math.random() * total;
   for (const item of catalog) {
@@ -442,7 +717,8 @@ const makeEntity = (kindOrDefinition, playerPosition, playerSize, idPrefix = '',
   const pos = randAround(playerPosition, distance, distance * 2.6, worldLimit);
   const constrained = constrainToWorld(pos.x, pos.z, phase);
   pos.set(constrained.x, 0, constrained.z);
-  const size = Math.max(MIN_LOGICAL_SIZE, definition.size * randomRange(0.88, 1.12));
+  const maxEdibleSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize) * getSpawnEdibleSizeRatio(playerSize));
+  const size = clamp(definition.size * randomRange(0.92, 1.08), MIN_LOGICAL_SIZE, maxEdibleSize);
 
   return {
     id: `${idPrefix}${kind}-${crypto.randomUUID()}`,
@@ -467,20 +743,22 @@ const placedEntity = (kind, x, z, size, idPrefix = 'starter-') => ({
   pulse: Math.random() * Math.PI * 2,
 });
 
-const initialEntities = (phase = 0) => {
+const initialEntities = (phase = 0, playerSize = WORLD_PHASES[phase]?.minSize ?? START_SIZE) => {
   const origin = new THREE.Vector3(0, 0, 0);
   const entities =
     phase === 0
       ? [
           placedEntity('ant', 0, -8, 0.08),
+          placedEntity('ant', 0, -13, 0.08),
           placedEntity('worm', -8, -15, 0.12),
+          placedEntity('worm', 7, -18, 0.12),
           placedEntity('flower', 11, -23, 0.2),
           placedEntity('brush', 24, -34, 0.3),
         ]
       : [];
 
   for (let i = entities.length; i < 66; i += 1) {
-    entities.push(makeEntity(pickEntityDefinition(phase), origin, Math.max(START_SIZE, WORLD_PHASES[phase]?.minSize ?? START_SIZE), 'initial-', getWorldLimit(phase), phase));
+    entities.push(makeEntity(pickEntityDefinition(playerSize), origin, Math.max(START_SIZE, playerSize), 'initial-', getWorldLimit(phase), phase));
   }
 
   return entities;
@@ -830,6 +1108,14 @@ function HUD({ stats, isPaused, onPauseToggle, onReset }) {
         <div>
           <span>Strength</span>
           <strong>{stats.strength}</strong>
+        </div>
+        <div>
+          <span>Score</span>
+          <strong>{stats.score}</strong>
+        </div>
+        <div>
+          <span>Time</span>
+          <strong>{stats.time}</strong>
         </div>
         <div>
           <span>Snacks</span>
@@ -2275,7 +2561,7 @@ function WorldTiles({ phase, won }) {
   );
 }
 
-function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, gameWon, gameLost }) {
+function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin, onLose, gameWon, gameLost }) {
   const { camera, gl } = useThree();
   const playerRef = useRef({
     position: new THREE.Vector3(0, 0, 0),
@@ -2285,6 +2571,8 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
     monkeys: 0,
     objects: 0,
     eaten: 0,
+    score: 0,
+    elapsedSeconds: 0,
     walkAmount: 0,
     munchUntil: 0,
     sceneryEatCooldown: 0,
@@ -2320,6 +2608,8 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
       onStats({
         sizeLabel: `${formatMagnitude(size)}x`,
         strength: formatMagnitude(strength, 1),
+        score: formatScore(player.score),
+        time: formatDuration(player.elapsedSeconds),
         bananas: player.bananas,
         monkeys: player.monkeys,
         objects: player.objects,
@@ -2346,7 +2636,7 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
     const targetEntityCount = getTargetEntityCount(inputRef.current.spawnMultiplier);
 
     while (entities.length < targetEntityCount) {
-      entities.push(makeEntity(pickEntityDefinition(worldPhaseRef.current), player.position, player.size, '', worldLimit, worldPhaseRef.current));
+      entities.push(makeEntity(pickEntityDefinition(player.size), player.position, player.size, '', worldLimit, worldPhaseRef.current));
     }
   }, [inputRef]);
 
@@ -2374,25 +2664,27 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
   }, []);
 
   const resetGame = useCallback(() => {
-    const startSize = getRequestedStartSize();
-    const startPhase = getWorldPhase(startSize);
+    const requestedStartSize = Number.isFinite(startSize) ? clamp(startSize, START_SIZE, MAX_LOGICAL_SIZE) : getRequestedStartSize();
+    const startPhase = getWorldPhase(requestedStartSize);
     playerRef.current = {
       position: new THREE.Vector3(0, 0, 0),
-      size: startSize,
+      size: requestedStartSize,
       heading: 0,
       bananas: 0,
       monkeys: 0,
       objects: 0,
       eaten: 0,
+      score: 0,
+      elapsedSeconds: 0,
       walkAmount: 0,
       munchUntil: 0,
       sceneryEatCooldown: 0,
       won: false,
       lost: false,
     };
-    entitiesRef.current = initialEntities(startPhase);
+    entitiesRef.current = initialEntities(startPhase, requestedStartSize);
     sceneryRef.current = createSceneryForPhase(startPhase);
-    rivalsRef.current = initialRivals(startSize, startPhase);
+    rivalsRef.current = initialRivals(requestedStartSize, startPhase);
     worldPhaseRef.current = startPhase;
     burstsRef.current = [];
     setWorldPhase(startPhase);
@@ -2401,7 +2693,7 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
     setRivalsVersion((value) => value + 1);
     setBurstsVersion((value) => value + 1);
     publishStats(true);
-  }, [publishStats]);
+  }, [publishStats, startSize]);
 
   useEffect(() => {
     resetGame();
@@ -2414,6 +2706,9 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
   useFrame((state, delta) => {
     const player = playerRef.current;
     const dt = Math.min(delta, 0.28);
+    if (!pausedRef.current && !player.won && !player.lost) {
+      player.elapsedSeconds = safeNumber(player.elapsedSeconds, 0) + dt;
+    }
     const activePhase = getWorldPhase(player.size);
     if (activePhase > worldPhaseRef.current) {
       worldPhaseRef.current = activePhase;
@@ -2425,7 +2720,7 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
     if (!player.won && activePhase >= 4 && player.size >= FINAL_GLOBE_SIZE) {
       player.won = true;
       player.munchUntil = state.clock.elapsedTime + 0.8;
-      onWin();
+      onWin(getPlayerSummary(player));
       publishStats(true);
     }
 
@@ -2684,6 +2979,7 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
 
         if (edible && collision) {
           const growth = getEntityGrowth(entity, player.size);
+          player.score = Math.round(safeNumber(player.score, 0) + getEatScore(entity.kind, entity.size, player.size, growth));
           player.size = addGrowth(player.size, growth);
           player.eaten += 1;
           player.munchUntil = state.clock.elapsedTime + 0.42;
@@ -2717,19 +3013,20 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
 
         if (edible && collision && canEatScenery && sceneryEatenThisFrame < MAX_SCENERY_EATS_PER_FRAME) {
           const growth = getSceneryGrowth(object, player.size);
-          const frameGrowthLimit = Math.max(0.02, player.size * 0.012);
+          const frameGrowthLimit = Math.max(0.06, player.size * (getGrowthCapRatio(player.size) + 0.004));
           if (sceneryGrowthThisFrame + growth > frameGrowthLimit) {
             nextScenery.push(object);
             continue;
           }
 
+          player.score = Math.round(safeNumber(player.score, 0) + getEatScore(object.kind, object.size, player.size, growth));
           player.size = addGrowth(player.size, growth);
           sceneryGrowthThisFrame += growth;
           sceneryEatenThisFrame += 1;
           player.eaten += 1;
           player.objects += 1;
           player.munchUntil = state.clock.elapsedTime + 0.5;
-          player.sceneryEatCooldown = ['building', 'tower', 'mountain'].includes(object.kind) ? 0.2 : 0.12;
+          player.sceneryEatCooldown = getSceneryEatCooldown(object.kind, player.size);
           burstsRef.current.push({
             id: `${object.id}-burst-${player.eaten}`,
             x: object.x,
@@ -2761,6 +3058,8 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
           const rivalCanEatPlayer = rival.size >= player.size * RIVAL_EAT_PLAYER_RATIO;
 
           if (collision && playerCanEat) {
+            const growth = Math.min(rival.size * 0.28, Math.max(0.45, player.size * 0.055));
+            player.score = Math.round(safeNumber(player.score, 0) + getEatScore('rival', rival.size, player.size, growth));
             player.size = addCappedGrowth(player.size, rival.size * 0.28, 0.055, 0.45);
             player.eaten += 1;
             player.objects += 1;
@@ -2791,7 +3090,7 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
               kind: 'player',
               createdAt: state.clock.elapsedTime,
             });
-            onLose();
+            onLose(getPlayerSummary(player));
             publishStats(true);
             nextRivals.push(rival);
             break;
@@ -2902,7 +3201,130 @@ function GameScene({ inputRef, pausedRef, resetToken, onStats, onWin, onLose, ga
   );
 }
 
+function LeaderboardTable({ entries, compact = false }) {
+  if (entries.length === 0) {
+    return <p className="leaderboard-empty">No finished runs yet</p>;
+  }
+
+  return (
+    <table className={`leaderboard-table${compact ? ' compact' : ''}`}>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Points</th>
+          <th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entries.map((entry, index) => (
+          <tr key={entry.id ?? `${entry.name}-${entry.completedAt}-${index}`}>
+            <td>{index + 1}</td>
+            <td>{entry.name}</td>
+            <td>{formatScore(entry.points)}</td>
+            <td>{formatDuration(entry.durationSeconds)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function LeaderboardPanel({ entries }) {
+  return (
+    <aside className="leaderboard-panel" aria-label="Top scores">
+      <div className="leaderboard-title">
+        <Trophy size={16} />
+        <strong>Top Scores</strong>
+      </div>
+      <LeaderboardTable entries={entries.slice(0, 5)} compact />
+    </aside>
+  );
+}
+
+function RunSummary({ result }) {
+  if (!result) return null;
+
+  return (
+    <div className="run-summary">
+      <div>
+        <span>Points</span>
+        <strong>{formatScore(result.points)}</strong>
+      </div>
+      <div>
+        <span>Time</span>
+        <strong>{formatDuration(result.durationSeconds)}</strong>
+      </div>
+      <div>
+        <span>Eaten</span>
+        <strong>{result.eaten}</strong>
+      </div>
+    </div>
+  );
+}
+
+function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, onSaveScore, onRestart }) {
+  const cleanName = sanitizePlayerName(playerName);
+
+  return (
+    <div className="end-panel win-panel" role="dialog" aria-modal="true" aria-labelledby="win-title">
+      <strong id="win-title">YOU WON</strong>
+      <span>Globe consumed</span>
+      <RunSummary result={result} />
+
+      {!scoreSaved ? (
+        <form className="score-form" onSubmit={onSaveScore}>
+          <label htmlFor="player-name">Name</label>
+          <div className="score-form-row">
+            <input
+              id="player-name"
+              type="text"
+              value={playerName}
+              maxLength={MAX_PLAYER_NAME_LENGTH}
+              autoComplete="off"
+              autoFocus
+              onChange={(event) => onNameChange(event.target.value)}
+            />
+            <button className="primary-button" type="submit" disabled={!cleanName}>
+              <Save size={16} />
+              Save
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button className="primary-button restart-button" type="button" onClick={onRestart}>
+          <RotateCcw size={16} />
+          Play Again
+        </button>
+      )}
+
+      <div className="end-leaderboard">
+        <div className="leaderboard-title">
+          <Trophy size={16} />
+          <strong>Top Scores</strong>
+        </div>
+        <LeaderboardTable entries={leaderboard.slice(0, 5)} compact />
+      </div>
+    </div>
+  );
+}
+
+function LosePanel({ result, onRestart }) {
+  return (
+    <div className="end-panel danger" role="dialog" aria-modal="true" aria-labelledby="lose-title">
+      <strong id="lose-title">YOU WERE EATEN</strong>
+      <span>A larger rival T-Rex got you</span>
+      <RunSummary result={result} />
+      <button className="primary-button restart-button" type="button" onClick={onRestart}>
+        <RotateCcw size={16} />
+        Restart
+      </button>
+    </div>
+  );
+}
+
 function App() {
+  const initialStartSizeRef = useRef(getRequestedStartSize());
   const inputRef = useRef({
     keyboard: new THREE.Vector2(),
     touch: new THREE.Vector2(),
@@ -2921,6 +3343,8 @@ function App() {
   const [stats, setStats] = useState({
     sizeLabel: '1.00x',
     strength: '12',
+    score: '0',
+    time: '0:00',
     bananas: 0,
     monkeys: 0,
     objects: 0,
@@ -2931,6 +3355,10 @@ function App() {
   const [paused, setPaused] = useState(false);
   const [gameWon, setGameWon] = useState(false);
   const [gameLost, setGameLost] = useState(false);
+  const [runResult, setRunResult] = useState(null);
+  const [leaderboard, setLeaderboard] = useState(() => loadLeaderboard());
+  const [playerName, setPlayerName] = useState(() => loadLastPlayerName());
+  const [scoreSaved, setScoreSaved] = useState(false);
   const [resetToken, setResetToken] = useState(0);
   const pausedRef = useRef(false);
 
@@ -2961,8 +3389,52 @@ function App() {
     setPaused(false);
     setGameWon(false);
     setGameLost(false);
+    setRunResult(null);
+    setScoreSaved(false);
     pausedRef.current = false;
     setResetToken((value) => value + 1);
+  };
+
+  const handleWin = (result) => {
+    setRunResult(result);
+    setGameWon(true);
+    setGameLost(false);
+    setPaused(true);
+    pausedRef.current = true;
+  };
+
+  const handleLose = (result) => {
+    setRunResult(result);
+    setGameLost(true);
+    setGameWon(false);
+    setPaused(true);
+    pausedRef.current = true;
+  };
+
+  const handlePlayerNameChange = (value) => {
+    setPlayerName(value.slice(0, MAX_PLAYER_NAME_LENGTH));
+  };
+
+  const saveScore = (event) => {
+    event.preventDefault();
+    if (!runResult) return;
+
+    const cleanName = sanitizePlayerName(playerName);
+    if (!cleanName) return;
+
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      name: cleanName,
+      points: Math.round(runResult.points),
+      durationSeconds: runResult.durationSeconds,
+      completedAt: new Date().toISOString(),
+    };
+    const nextLeaderboard = rankLeaderboard([...leaderboard, entry]);
+    saveLeaderboard(nextLeaderboard);
+    saveLastPlayerName(cleanName);
+    setPlayerName(cleanName);
+    setLeaderboard(nextLeaderboard);
+    setScoreSaved(true);
   };
 
   const onWheel = (event) => {
@@ -3024,27 +3496,31 @@ function App() {
           inputRef={inputRef}
           pausedRef={pausedRef}
           resetToken={resetToken}
+          startSize={resetToken === 0 ? initialStartSizeRef.current : START_SIZE}
           onStats={setStats}
-          onWin={() => setGameWon(true)}
-          onLose={() => setGameLost(true)}
+          onWin={handleWin}
+          onLose={handleLose}
           gameWon={gameWon}
           gameLost={gameLost}
         />
       </Canvas>
       <HUD stats={stats} isPaused={paused} onPauseToggle={togglePause} onReset={reset} />
+      <LeaderboardPanel entries={leaderboard} />
       <TouchJoystick inputRef={inputRef} />
       {paused && <div className="pause-scrim" aria-hidden="true" />}
       {gameWon && (
-        <div className="end-panel" role="status" aria-live="polite">
-          <strong>APEX T-REX</strong>
-          <span>Globe consumed</span>
-        </div>
+        <WinPanel
+          result={runResult}
+          playerName={playerName}
+          scoreSaved={scoreSaved}
+          leaderboard={leaderboard}
+          onNameChange={handlePlayerNameChange}
+          onSaveScore={saveScore}
+          onRestart={reset}
+        />
       )}
       {gameLost && (
-        <div className="end-panel danger" role="status" aria-live="assertive">
-          <strong>YOU WERE EATEN</strong>
-          <span>A larger rival T-Rex got you</span>
-        </div>
+        <LosePanel result={runResult} onRestart={reset} />
       )}
     </main>
   );
