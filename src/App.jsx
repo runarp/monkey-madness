@@ -33,7 +33,7 @@ const CAMERA_PITCH_MIN = -0.34;
 const CAMERA_PITCH_MAX = 0.72;
 const RIVAL_EAT_PLAYER_RATIO = 1.28;
 const PLAYER_EAT_RIVAL_RATIO = 1.08;
-const T_REX_MODEL_URL = '/assets/trex/poly-pizza-google-trex.glb';
+const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-google-trex.glb`;
 const T_REX_MODEL_TARGET_LENGTH = 3.2;
 const WORLD_PHASES = [
   { label: 'Country', minSize: START_SIZE },
@@ -101,6 +101,18 @@ const seeded = (value) => {
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const safeNumber = (value, fallback = START_SIZE) => (Number.isFinite(value) ? value : fallback);
+
+let uniqueIdCounter = 0;
+const createUniqueId = () => {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  } catch {
+    // Fall back below when randomUUID is blocked or unavailable.
+  }
+
+  uniqueIdCounter += 1;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${uniqueIdCounter.toString(36)}`;
+};
 
 const getSpawnMultiplierFromKeyCode = (code) => {
   const match = /^(?:Numpad|Digit)(\d)$/.exec(code);
@@ -721,7 +733,7 @@ const makeEntity = (kindOrDefinition, playerPosition, playerSize, idPrefix = '',
   const size = clamp(definition.size * randomRange(0.92, 1.08), MIN_LOGICAL_SIZE, maxEdibleSize);
 
   return {
-    id: `${idPrefix}${kind}-${crypto.randomUUID()}`,
+    id: `${idPrefix}${kind}-${createUniqueId()}`,
     kind,
     size,
     baseSize: definition.size,
@@ -733,7 +745,7 @@ const makeEntity = (kindOrDefinition, playerPosition, playerSize, idPrefix = '',
 };
 
 const placedEntity = (kind, x, z, size, idPrefix = 'starter-') => ({
-  id: `${idPrefix}${kind}-${crypto.randomUUID()}`,
+  id: `${idPrefix}${kind}-${createUniqueId()}`,
   kind,
   size,
   baseSize: size,
@@ -774,7 +786,7 @@ const makeRivalRex = (index, playerPosition, playerSize, phase) => {
   const size = clamp(safeNumber(playerSize) * sizeBand * (0.96 + seeded(seed + 11) * 0.12), START_SIZE * 0.9, Math.max(1.15, safeNumber(playerSize) * 1.42));
 
   return {
-    id: `rival-rex-${crypto.randomUUID()}`,
+    id: `rival-rex-${createUniqueId()}`,
     size,
     position: findPhaseSpawnPosition(safePhase, seed, playerPosition, minRadius, maxRadius),
     heading: seeded(seed + 3) * Math.PI * 2,
@@ -3489,7 +3501,7 @@ function App() {
       <Canvas
         shadows
         camera={{ position: [0, 28, 46], fov: 46, near: 0.1, far: 6000 }}
-        gl={{ antialias: true, logarithmicDepthBuffer: true, preserveDrawingBuffer: true }}
+        gl={{ antialias: true, preserveDrawingBuffer: true }}
         dpr={[1, 1.8]}
       >
         <GameScene
