@@ -238,6 +238,43 @@ input {
   transition: none;
 }
 
+.version-chip {
+  position: absolute;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 4;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: min(360px, calc(100vw - 170px));
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(25, 39, 36, 0.58);
+  box-shadow: 0 12px 30px rgba(14, 31, 30, 0.18);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+
+.version-chip span,
+.version-chip time {
+  overflow: hidden;
+  color: rgba(232, 242, 219, 0.7);
+  font-size: 0.68rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-chip strong {
+  color: #fff7db;
+  font-size: 0.72rem;
+  line-height: 1.1;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
 .pause-scrim {
   position: absolute;
   inset: 0;
@@ -425,6 +462,20 @@ input {
     bottom: max(154px, calc(env(safe-area-inset-bottom) + 154px));
     width: min(224px, calc(100vw - 158px));
     padding: 8px 10px 10px;
+  }
+
+  .version-chip {
+    max-width: min(210px, calc(100vw - 156px));
+    gap: 5px;
+    padding: 5px 7px;
+  }
+
+  .version-chip span {
+    display: none;
+  }
+
+  .version-chip time {
+    max-width: 130px;
   }
 
   .leaderboard-table th,

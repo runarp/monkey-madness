@@ -68,6 +68,7 @@ for (const viewport of scenarios) {
     ),
   );
   const hudValues = Object.values(hudStats);
+  const versionRef = await page.locator('.version-chip strong').textContent().catch(() => '');
   const bananas = Number(hudStats.Snacks ?? hudStats.Bananas ?? 0);
   const monkeys = Number(hudStats.Critters ?? hudStats.Monkeys ?? 0);
   const objects = Number(hudStats.Objects ?? 0);
@@ -166,6 +167,9 @@ for (const viewport of scenarios) {
   }
   if (hudValues.some((value) => value.length > 12)) {
     failures.push(`${viewport.name}: HUD value is too long after compact formatting: ${hudValues.join(', ')}`);
+  }
+  if (!/^[0-9a-f]{7,}$/i.test(versionRef ?? '')) {
+    failures.push(`${viewport.name}: version chip did not expose a commit ref; text was "${versionRef ?? ''}"`);
   }
 
   console.log(

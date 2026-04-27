@@ -35,6 +35,7 @@ const RIVAL_EAT_PLAYER_RATIO = 1.28;
 const PLAYER_EAT_RIVAL_RATIO = 1.08;
 const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-google-trex.glb`;
 const T_REX_MODEL_TARGET_LENGTH = 3.2;
+const APP_VERSION = typeof __APP_VERSION__ === 'object' && __APP_VERSION__ ? __APP_VERSION__ : { commitRef: 'dev', commitDate: '', buildTime: '' };
 const WORLD_PHASES = [
   { label: 'Country', minSize: START_SIZE },
   { label: 'Town', minSize: 4 },
@@ -351,6 +352,13 @@ const formatDuration = (seconds) => {
   const paddedSeconds = String(remainingSeconds).padStart(2, '0');
   if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${paddedSeconds}`;
   return `${minutes}:${paddedSeconds}`;
+};
+
+const formatVersionTime = (value) => {
+  const text = String(value ?? '');
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?/.exec(text);
+  if (!match) return text;
+  return `${match[1]} ${match[2]}${match[3] ? ` ${match[3]}` : ''}`;
 };
 
 const sanitizePlayerName = (name) => {
@@ -3377,6 +3385,20 @@ function LosePanel({ result, onRestart }) {
   );
 }
 
+function VersionBadge() {
+  const commitRef = APP_VERSION.commitRef || 'unknown';
+  const commitTime = formatVersionTime(APP_VERSION.commitDate || APP_VERSION.buildTime);
+  const buildTime = formatVersionTime(APP_VERSION.buildTime);
+
+  return (
+    <div className="version-chip" title={`Commit ${commitRef}${commitTime ? `\nCommit time ${commitTime}` : ''}${buildTime ? `\nBuilt ${buildTime}` : ''}`} aria-label={`Version ${commitRef}`}>
+      <span>Version</span>
+      <strong>{commitRef}</strong>
+      {commitTime && <time dateTime={APP_VERSION.commitDate || APP_VERSION.buildTime}>{commitTime}</time>}
+    </div>
+  );
+}
+
 function App() {
   const initialStartSizeRef = useRef(getRequestedStartSize());
   const inputRef = useRef({
@@ -3560,6 +3582,7 @@ function App() {
       </Canvas>
       <HUD stats={stats} isPaused={paused} onPauseToggle={togglePause} onReset={reset} />
       <LeaderboardPanel entries={leaderboard} />
+      <VersionBadge />
       <TouchJoystick inputRef={inputRef} />
       {paused && <div className="pause-scrim" aria-hidden="true" />}
       {gameWon && (
