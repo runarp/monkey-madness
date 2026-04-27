@@ -31,7 +31,7 @@ const CAMERA_ZOOM_MIN = 0.42;
 const CAMERA_ZOOM_MAX = 2.35;
 const CAMERA_PITCH_MIN = -0.34;
 const CAMERA_PITCH_MAX = 0.72;
-const RIVAL_EAT_PLAYER_RATIO = 1.28;
+const RIVAL_EAT_PLAYER_RATIO = 1.16;
 const PLAYER_EAT_RIVAL_RATIO = 1.08;
 const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-google-trex.glb`;
 const T_REX_MODEL_TARGET_LENGTH = 3.2;
@@ -151,7 +151,7 @@ const getRivalVisualSize = (size, playerSize) => {
 
   if (safeSize >= safePlayerSize) {
     const ratio = clamp(safeSize / safePlayerSize, 1, 2.6);
-    return clamp(playerVisual * ratio ** 0.72, playerVisual * 1.08, playerVisual * 1.92);
+    return clamp(playerVisual * ratio ** 0.72, playerVisual * 1.02, playerVisual * 1.82);
   }
 
   return getRelativeVisualSize(safeSize, safePlayerSize);
@@ -320,7 +320,7 @@ const getRivalMoveSpeed = (size, phase = 0) => getMoveSpeed(size, phase) * (0.58
 
 const getRivalThreat = (rivalSize, playerSize) => Math.max(0, safeNumber(rivalSize) / Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize)) - 1);
 
-const getRivalCountForPhase = (phase) => (phase >= 4 ? 0 : clamp(3 + phase, 3, MAX_RIVAL_REX_COUNT));
+const getRivalCountForPhase = (phase) => (phase >= 4 ? 0 : Math.min(3, MAX_RIVAL_REX_COUNT));
 
 const formatMagnitude = (value, digits = 2) => {
   const safeValue = Math.max(0, safeNumber(value, 0));
@@ -814,12 +814,15 @@ const initialEntities = (phase = 0, playerSize = WORLD_PHASES[phase]?.minSize ??
 
 const makeRivalRex = (index, playerPosition, playerSize, phase) => {
   const safePhase = clamp(phase, 0, MAX_WORLD_PHASE);
+  const safePlayerSize = Math.max(START_SIZE, safeNumber(playerSize));
   const visualSize = getVisualSize(playerSize);
   const minRadius = Math.max(260, visualSize * 8.5);
   const maxRadius = Math.max(minRadius + 220, visualSize * 13.5);
-  const seed = performance.now() * 0.001 + index * 719 + safeNumber(playerSize) * 3.1 + safePhase * 101;
-  const sizeBand = [0.72, 0.94, 1.34, 1.12, 1.24, 0.86][index % 6];
-  const size = clamp(safeNumber(playerSize) * sizeBand * (0.96 + seeded(seed + 11) * 0.12), START_SIZE * 0.9, Math.max(1.15, safeNumber(playerSize) * 1.42));
+  const seed = performance.now() * 0.001 + index * 719 + safePlayerSize * 3.1 + safePhase * 101;
+  const sizeBand = [0.52, 0.64, 0.76, 0.84, 0.9, 0.7][index % 6];
+  const minSpawnSize = Math.max(START_SIZE * 0.62, safePlayerSize * 0.42);
+  const maxSpawnSize = Math.max(START_SIZE * 0.82, safePlayerSize * 0.92);
+  const size = clamp(safePlayerSize * sizeBand * (0.96 + seeded(seed + 11) * 0.08), minSpawnSize, maxSpawnSize);
 
   return {
     id: `rival-rex-${createUniqueId()}`,
@@ -832,7 +835,7 @@ const makeRivalRex = (index, playerPosition, playerSize, phase) => {
     wanderAngle: seeded(seed + 7) * Math.PI * 2,
     wanderTimer: 0.4 + seeded(seed + 13) * 1.6,
     variantSeed: seeded(seed + 17),
-    aggression: 0.72 + seeded(seed + 23) * 0.38 + (sizeBand > 1.2 ? 0.22 : 0),
+    aggression: 0.62 + seeded(seed + 23) * 0.32,
     eaten: 0,
   };
 };
@@ -929,8 +932,8 @@ const makeBuildingObject = (id, x, z, seed, tier = 1) => {
     width,
     depth,
     height,
-    size: height * 0.56,
-    radius: Math.max(width, depth) * 0.72,
+    size: height * 0.9,
+    radius: Math.max(width, depth) * 0.82,
     growth: height * 0.12,
     color: ['#6d8fab', '#9aa3a8', '#c0b184', '#7b8794', '#b08d76'][Math.floor(seeded(seed + 4) * 5)],
     windowColor: seeded(seed + 5) > 0.45 ? '#ffd36a' : '#d6f4ff',
@@ -962,7 +965,7 @@ const makeTowerObject = (id, x, z, seed, tier = 1) => {
     y: terrainHeight(x, z),
     height,
     radius: 5.8 * tier,
-    size: height * 0.56,
+    size: height * 0.92,
     growth: height * 0.1,
     color: seeded(seed + 2) > 0.5 ? '#b7c0c7' : '#a1876d',
     cap: seeded(seed + 3) > 0.5 ? '#a43e32' : '#43617f',
@@ -1884,11 +1887,32 @@ function TinyEntityModel({ entity, playerSize }) {
   }
 
   if (entity.kind === 'building') {
-    return <BuildingModel object={{ width: 9 * scale, depth: 9 * scale, height: 28 * scale, color: '#7b8794', windowColor: '#ffd36a' }} />;
+    const visualSize = getRelativeVisualSize(entity.size, playerSize);
+    return (
+      <BuildingModel
+        object={{
+          width: Math.max(1.8, visualSize * 0.3),
+          depth: Math.max(1.8, visualSize * 0.3),
+          height: Math.max(4, visualSize * 0.9),
+          color: '#7b8794',
+          windowColor: '#ffd36a',
+        }}
+      />
+    );
   }
 
   if (entity.kind === 'tower') {
-    return <TowerModel object={{ height: 42 * scale, radius: 4.8 * scale, color: '#b7c0c7', cap: '#43617f' }} />;
+    const visualSize = getRelativeVisualSize(entity.size, playerSize);
+    return (
+      <TowerModel
+        object={{
+          height: Math.max(5, visualSize * 0.96),
+          radius: Math.max(0.9, visualSize * 0.13),
+          color: '#b7c0c7',
+          cap: '#43617f',
+        }}
+      />
+    );
   }
 
   if (entity.kind === 'mountain') {
@@ -2872,21 +2896,23 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
           rival.wanderTimer = Math.max(0, (rival.wanderTimer ?? 0) - dt);
 
           if (!player.won && playerDistance < detectRadius) {
-            if (rival.size >= player.size * RIVAL_EAT_PLAYER_RATIO) {
+            const rivalCanEatPlayer = rival.size >= player.size * RIVAL_EAT_PLAYER_RATIO;
+            const playerCanEatRival = player.size >= rival.size * PLAYER_EAT_RIVAL_RATIO;
+            if (rivalCanEatPlayer) {
               desiredX = player.position.x - rival.position.x;
               desiredZ = player.position.z - rival.position.z;
               hasTarget = true;
               chaseBoost = 1.2 + aggression * 0.18 + clamp(threat, 0, 0.8) * 0.22;
-            } else if (player.size >= rival.size * PLAYER_EAT_RIVAL_RATIO && playerDistance < detectRadius * 0.72) {
+            } else if (playerCanEatRival && playerDistance < detectRadius * 0.72) {
               desiredX = rival.position.x - player.position.x;
               desiredZ = rival.position.z - player.position.z;
               hasTarget = true;
               chaseBoost = 1.08 + aggression * 0.08;
-            } else if (rival.size > player.size && playerDistance < detectRadius * 0.52) {
-              desiredX = player.position.x - rival.position.x;
-              desiredZ = player.position.z - rival.position.z;
+            } else if (playerDistance < detectRadius * 0.42) {
+              desiredX = rival.position.x - player.position.x;
+              desiredZ = rival.position.z - player.position.z;
               hasTarget = true;
-              chaseBoost = 0.98 + aggression * 0.12;
+              chaseBoost = 0.82;
             }
           }
 
@@ -3156,6 +3182,20 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
             publishStats(true);
             nextRivals.push(rival);
             break;
+          } else if (collision) {
+            const fallbackAngle = rival.variantSeed * Math.PI * 2;
+            const awayX = dist > 0.001 ? (rival.position.x - player.position.x) / dist : Math.sin(fallbackAngle);
+            const awayZ = dist > 0.001 ? (rival.position.z - player.position.z) / dist : Math.cos(fallbackAngle);
+            const pushDistance = Math.max(6, (playerRadius + rivalRadius) * 0.16);
+            const nextPosition = constrainToWorld(rival.position.x + awayX * pushDistance, rival.position.z + awayZ * pushDistance, worldPhaseRef.current);
+            if (isLandInPhase(nextPosition.x, nextPosition.z, worldPhaseRef.current)) {
+              rival.position.x = nextPosition.x;
+              rival.position.z = nextPosition.z;
+              rival.heading = Math.atan2(awayX, awayZ);
+              rival.walkAmount = Math.min(1, (rival.walkAmount ?? 0) + dt * 3.5);
+              rivalsChanged = true;
+            }
+            nextRivals.push(rival);
           } else {
             nextRivals.push(rival);
           }

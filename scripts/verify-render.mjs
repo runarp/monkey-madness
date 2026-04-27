@@ -6,9 +6,9 @@ const baseUrl = process.env.GAME_URL ?? 'http://localhost:5173/';
 const artifactDir = new URL('../artifacts/', import.meta.url);
 
 const scenarios = [
-  { name: 'desktop', width: 1440, height: 900, isMobile: false, expectStarterSnack: true, expectRivals: true, expectCameraControls: true },
-  { name: 'mobile', width: 390, height: 844, isMobile: true, expectStarterSnack: true, expectRivals: true },
-  { name: 'mountain-speed', width: 1440, height: 900, isMobile: false, startSize: '130', expectStarterSnack: false, expectWorld: 'Mountains', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 180 },
+  { name: 'desktop', width: 1440, height: 900, isMobile: false, expectStarterSnack: true, expectRivals: true, expectCameraControls: true, maxSpawnRivalRatio: 0.96 },
+  { name: 'mobile', width: 390, height: 844, isMobile: true, expectStarterSnack: true, expectRivals: true, maxSpawnRivalRatio: 0.96 },
+  { name: 'mountain-speed', width: 1440, height: 900, isMobile: false, startSize: '130', expectStarterSnack: false, expectWorld: 'Mountains', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 180, maxSpawnRivalRatio: 0.96 },
   { name: 'globe-surface', width: 1440, height: 900, isMobile: false, startSize: '340', expectStarterSnack: false, expectWorld: 'Globe', expectGlobeSurface: true, expectGlobeScenery: true, maxSize: 390 },
   { name: 'globe-finale', width: 1440, height: 900, isMobile: false, startSize: '950', expectStarterSnack: false, expectWorld: 'Globe', expectEndPanel: true },
 ];
@@ -37,7 +37,9 @@ for (const viewport of scenarios) {
   const url = viewport.startSize ? `${baseUrl}?startSize=${viewport.startSize}` : baseUrl;
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.locator('canvas').waitFor({ state: 'visible' });
-  await page.waitForTimeout(1250);
+  await page.waitForTimeout(120);
+  const debugSpawn = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  await page.waitForTimeout(1130);
   const debugBefore = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
 
   await page.locator('canvas').click({ position: { x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2) } });
@@ -133,6 +135,11 @@ for (const viewport of scenarios) {
   }
   if (viewport.expectRivals && rivals < 1) {
     failures.push(`${viewport.name}: expected active rival T-Rex enemies; HUD values ${hudValues.join(', ')}`);
+  }
+  if (viewport.maxSpawnRivalRatio && debugSpawn?.largestRivalSize > debugSpawn.size * viewport.maxSpawnRivalRatio) {
+    failures.push(
+      `${viewport.name}: fresh rival spawned too large; largest ${debugSpawn.largestRivalSize.toFixed(2)} vs player ${debugSpawn.size.toFixed(2)}`,
+    );
   }
   if (viewport.expectGlobeSurface && debugAfter?.groundMode !== 'globe') {
     failures.push(`${viewport.name}: expected player to use globe surface height, got ${JSON.stringify(debugAfter)}`);
