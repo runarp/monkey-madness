@@ -7,7 +7,8 @@ const artifactDir = new URL('../artifacts/', import.meta.url);
 
 const scenarios = [
   { name: 'desktop', width: 1440, height: 900, isMobile: false, expectStarterSnack: true, expectRivals: true, expectCameraControls: true, maxSpawnRivalRatio: 0.96 },
-  { name: 'mobile', width: 390, height: 844, isMobile: true, expectStarterSnack: true, expectRivals: true, maxSpawnRivalRatio: 0.96 },
+  { name: 'mobile', width: 390, height: 844, isMobile: true, expectTouchControls: true, expectStarterSnack: true, expectRivals: true, maxSpawnRivalRatio: 0.96 },
+  { name: 'ipad-touch', width: 820, height: 720, isMobile: true, expectTouchControls: true, expectTouchCameraControls: true, expectStarterSnack: true, expectRivals: true, maxSpawnRivalRatio: 0.96 },
   { name: 'mountain-speed', width: 1440, height: 900, isMobile: false, startSize: '130', expectStarterSnack: false, expectWorld: 'Mountains', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 180, maxSpawnRivalRatio: 0.96 },
   { name: 'globe-surface', width: 1440, height: 900, isMobile: false, startSize: '340', expectStarterSnack: false, expectWorld: 'Globe', expectGlobeSurface: true, expectGlobeScenery: true, maxSize: 390 },
   { name: 'globe-finale', width: 1440, height: 900, isMobile: false, startSize: '950', expectStarterSnack: false, expectWorld: 'Globe', expectEndPanel: true },
@@ -39,15 +40,42 @@ for (const viewport of scenarios) {
   await page.locator('canvas').waitFor({ state: 'visible' });
   await page.waitForTimeout(120);
   const debugSpawn = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  const touchControls = viewport.expectTouchControls
+    ? await page.locator('.touch-joystick').evaluateAll((nodes) =>
+        nodes.map((node) => {
+          const rect = node.getBoundingClientRect();
+          const style = window.getComputedStyle(node);
+          return {
+            className: node.className,
+            display: style.display,
+            width: rect.width,
+            height: rect.height,
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        }),
+      )
+    : [];
   await page.waitForTimeout(1130);
   const debugBefore = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
 
-  await page.locator('canvas').click({ position: { x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2) } });
-  await page.keyboard.down('ArrowUp');
-  await page.waitForTimeout(1650);
-  await page.keyboard.up('ArrowUp');
-  await page.waitForTimeout(200);
-  const debugAfter = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  let debugAfter = debugBefore;
+  if (!viewport.expectEndPanel) {
+    await page.locator('canvas').click({ position: { x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2) } });
+    await page.keyboard.down('ArrowUp');
+    await page.waitForTimeout(1650);
+    await page.keyboard.up('ArrowUp');
+    await page.waitForTimeout(200);
+    debugAfter = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  } else {
+    await page.locator('.end-panel').waitFor({ state: 'visible' });
+    await page.waitForTimeout(520);
+    debugAfter = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  }
 
   let debugAfterCamera = debugAfter;
   if (viewport.expectCameraControls) {
@@ -58,6 +86,25 @@ for (const viewport of scenarios) {
     await page.mouse.up({ button: 'right' });
     await page.waitForTimeout(350);
     debugAfterCamera = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+  }
+
+  let debugAfterTouchCamera = debugAfterCamera;
+  if (viewport.expectTouchCameraControls) {
+    const cameraWheel = await page.locator('.camera-joystick').boundingBox();
+    if (!cameraWheel) {
+      failures.push(`${viewport.name}: expected camera touch wheel to be visible`);
+    } else {
+      const centerX = cameraWheel.x + cameraWheel.width / 2;
+      const centerY = cameraWheel.y + cameraWheel.height / 2;
+      await page.mouse.move(centerX, centerY);
+      await page.mouse.down();
+      await page.mouse.move(centerX + cameraWheel.width * 0.28, centerY + cameraWheel.height * 0.28, { steps: 4 });
+      await page.waitForTimeout(720);
+      await page.mouse.up();
+      await page.waitForTimeout(220);
+      debugAfterTouchCamera = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
+      debugAfterCamera = debugAfterTouchCamera;
+    }
   }
 
   const hudStats = await page.locator('.stat-panel div').evaluateAll((nodes) =>
@@ -141,6 +188,35 @@ for (const viewport of scenarios) {
       `${viewport.name}: fresh rival spawned too large; largest ${debugSpawn.largestRivalSize.toFixed(2)} vs player ${debugSpawn.size.toFixed(2)}`,
     );
   }
+  if (viewport.expectTouchControls) {
+    if (touchControls.length !== 2) {
+      failures.push(`${viewport.name}: expected two touch wheels, found ${touchControls.length}`);
+    }
+    for (const control of touchControls) {
+      const bottomGap = control.viewportHeight - control.bottom;
+      const insideViewport =
+        control.display !== 'none' &&
+        control.width >= 110 &&
+        control.height >= 110 &&
+        control.left >= 0 &&
+        control.top >= 0 &&
+        control.right <= control.viewportWidth &&
+        control.bottom <= control.viewportHeight &&
+        bottomGap >= 24;
+      if (!insideViewport) {
+        failures.push(`${viewport.name}: touch wheel is clipped or too low ${JSON.stringify(control)}`);
+      }
+    }
+  }
+  if (viewport.expectTouchCameraControls && debugBefore && debugAfterTouchCamera) {
+    const yawChanged = Math.abs((debugAfterTouchCamera.cameraYaw ?? 0) - (debugBefore.cameraYaw ?? 0)) > 0.18;
+    const pitchChanged = Math.abs((debugAfterTouchCamera.cameraPitch ?? 0) - (debugBefore.cameraPitch ?? 0)) > 0.08;
+    if (!yawChanged || !pitchChanged) {
+      failures.push(
+        `${viewport.name}: touch camera wheel did not update enough; before ${JSON.stringify(debugBefore)}, after ${JSON.stringify(debugAfterTouchCamera)}`,
+      );
+    }
+  }
   if (viewport.expectGlobeSurface && debugAfter?.groundMode !== 'globe') {
     failures.push(`${viewport.name}: expected player to use globe surface height, got ${JSON.stringify(debugAfter)}`);
   }
@@ -169,8 +245,19 @@ for (const viewport of scenarios) {
       );
     }
   }
-  if (viewport.expectEndPanel && !(await page.locator('.end-panel').isVisible())) {
-    failures.push(`${viewport.name}: expected finale panel to be visible`);
+  if (viewport.expectEndPanel) {
+    if (!(await page.locator('.end-panel').isVisible())) {
+      failures.push(`${viewport.name}: expected finale panel to be visible`);
+    }
+    const nameInput = page.locator('#player-name');
+    if (!(await nameInput.isVisible().catch(() => false))) {
+      failures.push(`${viewport.name}: expected focused score name input`);
+    } else {
+      const nameInputFocused = await nameInput.evaluate((node) => document.activeElement === node);
+      if (!nameInputFocused) {
+        failures.push(`${viewport.name}: score name input was not focused for keyboard entry`);
+      }
+    }
   }
   if (hudValues.some((value) => value.length > 12)) {
     failures.push(`${viewport.name}: HUD value is too long after compact formatting: ${hudValues.join(', ')}`);

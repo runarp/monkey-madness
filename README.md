@@ -15,6 +15,8 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 ## Controls
 
 - `WASD` or arrow keys: move
+- Touch left stick: move
+- Touch right stick: rotate/tilt camera
 - Mouse wheel: zoom camera
 - Right-click drag: rotate/tilt camera
 - Number keys or numpad:

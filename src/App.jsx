@@ -31,6 +31,9 @@ const CAMERA_ZOOM_MIN = 0.42;
 const CAMERA_ZOOM_MAX = 2.35;
 const CAMERA_PITCH_MIN = -0.34;
 const CAMERA_PITCH_MAX = 0.72;
+const CAMERA_TOUCH_YAW_SPEED = 1.65;
+const CAMERA_TOUCH_PITCH_SPEED = 0.95;
+const CAMERA_TOUCH_DEAD_ZONE = 0.05;
 const RIVAL_EAT_PLAYER_RATIO = 1.16;
 const PLAYER_EAT_RIVAL_RATIO = 1.08;
 const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-google-trex.glb`;
@@ -1206,10 +1209,24 @@ function HUD({ stats, isPaused, onPauseToggle, onReset }) {
   );
 }
 
-function TouchJoystick({ inputRef }) {
+function TouchJoystick({ inputRef, mode = 'move', ariaLabel = 'Move' }) {
   const shellRef = useRef(null);
   const pointerIdRef = useRef(null);
   const [knob, setKnob] = useState({ x: 0, y: 0, active: false });
+  const isCamera = mode === 'camera';
+
+  const setControlVector = useCallback(
+    (x, y) => {
+      if (isCamera) {
+        inputRef.current.camera.touch.set(x, y);
+      } else {
+        inputRef.current.touch.set(x, y);
+      }
+    },
+    [inputRef, isCamera],
+  );
+
+  useEffect(() => () => setControlVector(0, 0), [setControlVector]);
 
   const updateFromEvent = useCallback(
     (event) => {
@@ -1223,38 +1240,45 @@ function TouchJoystick({ inputRef }) {
       const dx = clamp(event.clientX - centerX, -max, max);
       const dy = clamp(event.clientY - centerY, -max, max);
 
-      inputRef.current.touch.set(dx / max, dy / max);
+      setControlVector(dx / max, dy / max);
       setKnob({ x: dx, y: dy, active: true });
     },
-    [inputRef],
+    [setControlVector],
   );
 
   const onPointerDown = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     pointerIdRef.current = event.pointerId;
-    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     updateFromEvent(event);
   };
 
   const onPointerMove = (event) => {
+    event.stopPropagation();
     if (pointerIdRef.current === event.pointerId) updateFromEvent(event);
   };
 
   const endTouch = (event) => {
+    event.stopPropagation();
     if (pointerIdRef.current !== event.pointerId) return;
     pointerIdRef.current = null;
-    inputRef.current.touch.set(0, 0);
+    setControlVector(0, 0);
     setKnob({ x: 0, y: 0, active: false });
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   };
 
   return (
     <div
       ref={shellRef}
-      className={`touch-joystick${knob.active ? ' active' : ''}`}
+      className={`touch-joystick ${isCamera ? 'camera-joystick' : 'move-joystick'}${knob.active ? ' active' : ''}`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endTouch}
       onPointerCancel={endTouch}
-      aria-label="Move"
+      aria-label={ariaLabel}
       role="application"
     >
       <div className="joystick-knob" style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }} />
@@ -3231,6 +3255,19 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     const visualSize = getVisualSize(player.size);
     const worldLimit = getWorldLimit(worldPhaseRef.current);
     const cameraControls = inputRef.current.camera;
+    const cameraTouch = cameraControls?.touch;
+    if (!pausedRef.current && !player.won && !player.lost && cameraTouch) {
+      const touchYaw = Math.abs(cameraTouch.x) > CAMERA_TOUCH_DEAD_ZONE ? cameraTouch.x : 0;
+      const touchPitch = Math.abs(cameraTouch.y) > CAMERA_TOUCH_DEAD_ZONE ? cameraTouch.y : 0;
+      if (touchYaw || touchPitch) {
+        cameraControls.yaw = safeNumber(cameraControls.yaw, 0) - touchYaw * CAMERA_TOUCH_YAW_SPEED * dt;
+        cameraControls.pitch = clamp(
+          safeNumber(cameraControls.pitch, 0) + touchPitch * CAMERA_TOUCH_PITCH_SPEED * dt,
+          CAMERA_PITCH_MIN,
+          CAMERA_PITCH_MAX,
+        );
+      }
+    }
     const zoom = clamp(safeNumber(cameraControls?.zoom, 1), CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
     const yaw = safeNumber(cameraControls?.yaw, 0);
     const pitchOffset = clamp(safeNumber(cameraControls?.pitch, 0), CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
@@ -3367,6 +3404,28 @@ function RunSummary({ result }) {
 
 function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, onSaveScore, onRestart }) {
   const cleanName = sanitizePlayerName(playerName);
+  const nameInputRef = useRef(null);
+
+  useEffect(() => {
+    if (scoreSaved) return undefined;
+
+    const focusNameInput = () => {
+      const input = nameInputRef.current;
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      input.select();
+      navigator.virtualKeyboard?.show?.();
+    };
+
+    focusNameInput();
+    const raf = requestAnimationFrame(focusNameInput);
+    const timeouts = [140, 420].map((delay) => window.setTimeout(focusNameInput, delay));
+
+    return () => {
+      cancelAnimationFrame(raf);
+      timeouts.forEach((timeout) => window.clearTimeout(timeout));
+    };
+  }, [scoreSaved]);
 
   return (
     <div className="end-panel win-panel" role="dialog" aria-modal="true" aria-labelledby="win-title">
@@ -3379,12 +3438,15 @@ function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, o
           <label htmlFor="player-name">Name</label>
           <div className="score-form-row">
             <input
+              ref={nameInputRef}
               id="player-name"
               type="text"
               value={playerName}
               maxLength={MAX_PLAYER_NAME_LENGTH}
               autoComplete="off"
               autoFocus
+              inputMode="text"
+              enterKeyHint="done"
               onChange={(event) => onNameChange(event.target.value)}
             />
             <button className="primary-button" type="submit" disabled={!cleanName}>
@@ -3450,6 +3512,7 @@ function App() {
       zoom: 1,
       yaw: 0,
       pitch: 0,
+      touch: new THREE.Vector2(),
       dragging: false,
       pointerId: null,
       lastX: 0,
@@ -3491,6 +3554,7 @@ function App() {
   const reset = () => {
     inputRef.current.keyboard.set(0, 0);
     inputRef.current.touch.set(0, 0);
+    inputRef.current.camera.touch.set(0, 0);
     inputRef.current.spawnMultiplier = DEFAULT_SPAWN_MULTIPLIER;
     inputRef.current.spawnCheatChangedAt = 0;
     Object.assign(inputRef.current.camera, {
@@ -3623,7 +3687,8 @@ function App() {
       <HUD stats={stats} isPaused={paused} onPauseToggle={togglePause} onReset={reset} />
       <LeaderboardPanel entries={leaderboard} />
       <VersionBadge />
-      <TouchJoystick inputRef={inputRef} />
+      <TouchJoystick inputRef={inputRef} mode="move" ariaLabel="Move" />
+      <TouchJoystick inputRef={inputRef} mode="camera" ariaLabel="Camera angle" />
       {paused && <div className="pause-scrim" aria-hidden="true" />}
       {gameWon && (
         <WinPanel
