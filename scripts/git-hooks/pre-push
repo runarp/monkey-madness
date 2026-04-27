@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Git has no client-side "post-push" hook. This pre-push hook schedules a deploy ping
+# in the background after your push finishes (short delay). Install:
+#   ./scripts/install-deploy-ping-hook.sh
+#
+# Override ping script path:
+#   export MONKEY_MADNESS_DEPLOY_PING=/path/to/ping-monkey-madness-deploy.sh
+
+set -e
+
+ping_main=0
+# Git requires the hook to read all ref updates from stdin.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main) ping_main=1 ;;
+  esac
+done
+
+if [[ "$ping_main" -eq 0 ]]; then
+  exit 0
+fi
+
+PING="${MONKEY_MADNESS_DEPLOY_PING:-}"
+if [[ -z "$PING" || ! -x "$PING" ]]; then
+  # Default: gp-ops sibling of this clone (runarp layout)
+  _root="$(git rev-parse --show-toplevel)"
+  PING="${_root}/../gp-ops/ops-ansible/scripts/ping-monkey-madness-deploy.sh"
+fi
+
+if [[ ! -x "$PING" ]]; then
+  echo "monkey-madness pre-push: no executable ping script at $PING (set MONKEY_MADNESS_DEPLOY_PING)" >&2
+  exit 0
+fi
+
+# Push runs after this hook returns; wait so origin/main on GitHub includes your commits.
+( sleep 35; "$PING" ) </dev/null >/dev/null 2>&1 &
+disown || true
+exit 0

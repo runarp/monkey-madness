@@ -16,7 +16,7 @@ const BASE_ENTITY_COUNT = 92;
 const DEFAULT_SPAWN_MULTIPLIER = 2;
 const MAX_SPAWN_MULTIPLIER = 20;
 const MAX_RIVAL_REX_COUNT = 6;
-const FINAL_GLOBE_SIZE = 620;
+const FINAL_GLOBE_SIZE = 900;
 const MAX_SCENERY_EATS_PER_FRAME = 1;
 const ENTITY_GROWTH_CAP_RATIO = 0.045;
 const SCENERY_GROWTH_CAP_RATIO = 0.045;
@@ -37,10 +37,10 @@ const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-googl
 const T_REX_MODEL_TARGET_LENGTH = 3.2;
 const WORLD_PHASES = [
   { label: 'Country', minSize: START_SIZE },
-  { label: 'Region', minSize: 3.5 },
-  { label: 'Continents', minSize: 18 },
-  { label: 'Planet', minSize: 72 },
-  { label: 'Globe', minSize: 220 },
+  { label: 'Town', minSize: 4 },
+  { label: 'City', minSize: 24 },
+  { label: 'Mountains', minSize: 110 },
+  { label: 'Globe', minSize: 320 },
 ];
 const TILE_COORDS_BY_PHASE = [
   [[0, 0]],
@@ -222,6 +222,11 @@ const getGrowthCapRatio = (size) => {
   return 0.014;
 };
 
+const getFrameGrowthLimit = (size) => {
+  const safeSize = Math.max(START_SIZE, safeNumber(size));
+  return Math.max(0.06, safeSize * (getGrowthCapRatio(safeSize) + 0.004));
+};
+
 const getSpawnEdibleSizeRatio = (playerSize) => {
   const safeSize = Math.max(START_SIZE, safeNumber(playerSize));
   if (safeSize < WORLD_PHASES[1].minSize) return SPAWN_EDIBLE_SIZE_RATIO;
@@ -237,6 +242,29 @@ const getSceneryEatCooldown = (kind, playerSize) => {
   if (kind === 'building') return phase >= 3 ? 0.52 : 0.42;
   if (kind === 'house' || kind === 'tank') return 0.28;
   return 0.16;
+};
+
+const getPlayerEatCooldown = (kind, playerSize) => {
+  const baseCooldown = {
+    ant: 0.06,
+    worm: 0.07,
+    flower: 0.08,
+    brush: 0.1,
+    signpost: 0.11,
+    banana: 0.12,
+    sapling: 0.14,
+    monkey: 0.16,
+    tree: 0.2,
+    car: 0.24,
+    house: 0.28,
+    tank: 0.34,
+    building: 0.52,
+    tower: 0.64,
+    mountain: 0.82,
+    rival: 0.9,
+  }[kind] ?? 0.16;
+
+  return Math.max(baseCooldown, getSceneryEatCooldown(kind, playerSize) * 0.75);
 };
 
 const getEatScore = (kind, targetSize, eaterSize, growth = 0) => {
@@ -2587,6 +2615,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     elapsedSeconds: 0,
     walkAmount: 0,
     munchUntil: 0,
+    eatCooldown: 0,
     sceneryEatCooldown: 0,
     won: false,
     lost: false,
@@ -2690,6 +2719,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       elapsedSeconds: 0,
       walkAmount: 0,
       munchUntil: 0,
+      eatCooldown: 0,
       sceneryEatCooldown: 0,
       won: false,
       lost: false,
@@ -2780,7 +2810,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       const worldLimit = getWorldLimit(worldPhaseRef.current);
       const playerRadius = Math.max(0.55, getVisualSize(player.size) * 0.68);
       let sceneryEatenThisFrame = 0;
-      let sceneryGrowthThisFrame = 0;
+      let growthThisFrame = 0;
+      player.eatCooldown = Math.max(0, (player.eatCooldown ?? 0) - dt);
       player.sceneryEatCooldown = Math.max(0, (player.sceneryEatCooldown ?? 0) - dt);
 
       for (const entity of entitiesRef.current) {
@@ -2988,13 +3019,21 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         const entityRadius = Math.max(0.16, getRelativeVisualSize(entity.size, player.size) * 0.45);
         const edible = isEntityEdibleBy(entity, player.size);
         const collision = dist < playerRadius + entityRadius;
+        const canEatEntity = (player.eatCooldown ?? 0) <= 0;
 
-        if (edible && collision) {
+        if (edible && collision && canEatEntity) {
           const growth = getEntityGrowth(entity, player.size);
+          if (growthThisFrame + growth > getFrameGrowthLimit(player.size)) {
+            nextEntities.push(entity);
+            continue;
+          }
+
           player.score = Math.round(safeNumber(player.score, 0) + getEatScore(entity.kind, entity.size, player.size, growth));
           player.size = addGrowth(player.size, growth);
+          growthThisFrame += growth;
           player.eaten += 1;
           player.munchUntil = state.clock.elapsedTime + 0.42;
+          player.eatCooldown = getPlayerEatCooldown(entity.kind, player.size);
           if (CRITTER_ENTITY_KINDS.has(entity.kind)) player.monkeys += 1;
           else player.bananas += 1;
           burstsRef.current.push({
@@ -3021,24 +3060,25 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         const edible = object.size <= player.size * 0.95;
         const collision = dist < playerRadius + object.radius;
 
-        const canEatScenery = (player.sceneryEatCooldown ?? 0) <= 0;
+        const canEatScenery = (player.sceneryEatCooldown ?? 0) <= 0 && (player.eatCooldown ?? 0) <= 0;
 
         if (edible && collision && canEatScenery && sceneryEatenThisFrame < MAX_SCENERY_EATS_PER_FRAME) {
           const growth = getSceneryGrowth(object, player.size);
-          const frameGrowthLimit = Math.max(0.06, player.size * (getGrowthCapRatio(player.size) + 0.004));
-          if (sceneryGrowthThisFrame + growth > frameGrowthLimit) {
+          const frameGrowthLimit = getFrameGrowthLimit(player.size);
+          if (growthThisFrame + growth > frameGrowthLimit) {
             nextScenery.push(object);
             continue;
           }
 
           player.score = Math.round(safeNumber(player.score, 0) + getEatScore(object.kind, object.size, player.size, growth));
           player.size = addGrowth(player.size, growth);
-          sceneryGrowthThisFrame += growth;
+          growthThisFrame += growth;
           sceneryEatenThisFrame += 1;
           player.eaten += 1;
           player.objects += 1;
           player.munchUntil = state.clock.elapsedTime + 0.5;
           player.sceneryEatCooldown = getSceneryEatCooldown(object.kind, player.size);
+          player.eatCooldown = getPlayerEatCooldown(object.kind, player.size);
           burstsRef.current.push({
             id: `${object.id}-burst-${player.eaten}`,
             x: object.x,
@@ -3068,14 +3108,16 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
           const collision = dist < (playerRadius + rivalRadius) * 0.78;
           const playerCanEat = player.size >= rival.size * PLAYER_EAT_RIVAL_RATIO;
           const rivalCanEatPlayer = rival.size >= player.size * RIVAL_EAT_PLAYER_RATIO;
+          const canEatRival = (player.eatCooldown ?? 0) <= 0;
 
-          if (collision && playerCanEat) {
+          if (collision && playerCanEat && canEatRival) {
             const growth = Math.min(rival.size * 0.28, Math.max(0.45, player.size * 0.055));
             player.score = Math.round(safeNumber(player.score, 0) + getEatScore('rival', rival.size, player.size, growth));
             player.size = addCappedGrowth(player.size, rival.size * 0.28, 0.055, 0.45);
             player.eaten += 1;
             player.objects += 1;
             player.munchUntil = state.clock.elapsedTime + 0.62;
+            player.eatCooldown = getPlayerEatCooldown('rival', player.size);
             ateSomething = true;
             rivalsChanged = true;
             burstsRef.current.push({

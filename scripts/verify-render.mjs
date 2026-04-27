@@ -8,9 +8,9 @@ const artifactDir = new URL('../artifacts/', import.meta.url);
 const scenarios = [
   { name: 'desktop', width: 1440, height: 900, isMobile: false, expectStarterSnack: true, expectRivals: true, expectCameraControls: true },
   { name: 'mobile', width: 390, height: 844, isMobile: true, expectStarterSnack: true, expectRivals: true },
-  { name: 'planet-speed', width: 1440, height: 900, isMobile: false, startSize: '90', expectStarterSnack: false, expectWorld: 'Planet', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 130 },
-  { name: 'globe-surface', width: 1440, height: 900, isMobile: false, startSize: '240', expectStarterSnack: false, expectWorld: 'Globe', expectGlobeSurface: true, expectGlobeScenery: true },
-  { name: 'globe-finale', width: 1440, height: 900, isMobile: false, startSize: '700', expectStarterSnack: false, expectWorld: 'Globe', expectEndPanel: true },
+  { name: 'mountain-speed', width: 1440, height: 900, isMobile: false, startSize: '130', expectStarterSnack: false, expectWorld: 'Mountains', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 180 },
+  { name: 'globe-surface', width: 1440, height: 900, isMobile: false, startSize: '340', expectStarterSnack: false, expectWorld: 'Globe', expectGlobeSurface: true, expectGlobeScenery: true, maxSize: 390 },
+  { name: 'globe-finale', width: 1440, height: 900, isMobile: false, startSize: '950', expectStarterSnack: false, expectWorld: 'Globe', expectEndPanel: true },
 ];
 
 await mkdir(artifactDir, { recursive: true });
