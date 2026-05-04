@@ -22,10 +22,14 @@ const ENTITY_GROWTH_CAP_RATIO = 0.045;
 const SCENERY_GROWTH_CAP_RATIO = 0.045;
 const SPAWN_EDIBLE_SIZE_RATIO = 0.9;
 const SCORE_API_PATH = '/api/scores';
+const MULTIPLAYER_API_PATH = '/api/multiplayer';
 const LEADERBOARD_STORAGE_KEY = 'monkey-madness:top-scores:v1';
 const LAST_PLAYER_NAME_KEY = 'monkey-madness:last-player-name';
+const MULTIPLAYER_PLAYER_ID_KEY = 'monkey-madness:multiplayer-player-id:v1';
 const MAX_LEADERBOARD_ENTRIES = 8;
 const MAX_PLAYER_NAME_LENGTH = 14;
+const MULTIPLAYER_STATE_INTERVAL_MS = 90;
+const MULTIPLAYER_SNAPSHOT_POLL_MS = 2500;
 const GLOBE_RADIUS = 8200;
 const GLOBE_WORLD_LIMIT = GLOBE_RADIUS * 0.92;
 const CAMERA_ZOOM_MIN = 0.42;
@@ -37,6 +41,7 @@ const CAMERA_TOUCH_PITCH_SPEED = 0.95;
 const CAMERA_TOUCH_DEAD_ZONE = 0.05;
 const RIVAL_EAT_PLAYER_RATIO = 1.16;
 const PLAYER_EAT_RIVAL_RATIO = 1.08;
+const PLAYER_EAT_PLAYER_RATIO = 1.08;
 const T_REX_MODEL_URL = `${import.meta.env.BASE_URL}assets/trex/poly-pizza-google-trex.glb`;
 const T_REX_MODEL_TARGET_LENGTH = 3.2;
 const APP_VERSION = typeof __APP_VERSION__ === 'object' && __APP_VERSION__ ? __APP_VERSION__ : { commitRef: 'dev', commitDate: '', buildTime: '' };
@@ -267,6 +272,7 @@ const getPlayerEatCooldown = (kind, playerSize) => {
     tower: 0.64,
     mountain: 0.82,
     rival: 0.9,
+    player: 0.9,
   }[kind] ?? 0.16;
 
   return Math.max(baseCooldown, getSceneryEatCooldown(kind, playerSize) * 0.75);
@@ -290,6 +296,7 @@ const getEatScore = (kind, targetSize, eaterSize, growth = 0) => {
     tower: 64,
     mountain: 85,
     rival: 120,
+    player: 150,
   }[kind] ?? 10;
   const sizeScore = Math.sqrt(Math.max(MIN_LOGICAL_SIZE, safeNumber(targetSize))) * 18;
   const growthScore = Math.max(0, safeNumber(growth, 0)) * 95;
@@ -401,6 +408,25 @@ const saveLastPlayerName = (name) => {
   window.localStorage.setItem(LAST_PLAYER_NAME_KEY, name);
 };
 
+const loadMultiplayerPlayerId = () => {
+  if (typeof window === 'undefined') return createUniqueId();
+
+  const existingId = window.localStorage.getItem(MULTIPLAYER_PLAYER_ID_KEY);
+  if (existingId) return existingId;
+
+  const id = createUniqueId();
+  window.localStorage.setItem(MULTIPLAYER_PLAYER_ID_KEY, id);
+  return id;
+};
+
+const getMultiplayerPlayerName = () => sanitizePlayerName(loadLastPlayerName()) || 'Player';
+
+const getMultiplayerTone = (id) => {
+  let hash = 0;
+  for (const char of String(id)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return (hash % 997) / 997;
+};
+
 const parseScoresResponse = (payload) => rankLeaderboard(Array.isArray(payload?.scores) ? payload.scores : []);
 
 const fetchSharedLeaderboard = async (signal) => {
@@ -414,6 +440,19 @@ const fetchSharedLeaderboard = async (signal) => {
   }
 
   return parseScoresResponse(await response.json());
+};
+
+const fetchMultiplayerSnapshot = async (signal) => {
+  const response = await fetch(`${MULTIPLAYER_API_PATH}/snapshot`, {
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Multiplayer API returned ${response.status}`);
+  }
+
+  return response.json();
 };
 
 const submitSharedScore = async ({ name, points, durationSeconds }) => {
@@ -1219,6 +1258,10 @@ function HUD({ stats, isPaused, onPauseToggle, onReset }) {
         <div>
           <span>Rivals</span>
           <strong>{stats.rivals}</strong>
+        </div>
+        <div>
+          <span>Players</span>
+          <strong>{stats.players}</strong>
         </div>
         <div>
           <span>Spawns</span>
@@ -2523,6 +2566,34 @@ function RivalRex({ rival, playerSize, worldPhase }) {
   );
 }
 
+function RemotePlayer({ remotePlayer, playerRef, worldPhase }) {
+  const groupRef = useRef(null);
+  const remoteRef = useRef(remotePlayer);
+  remoteRef.current = remotePlayer;
+
+  useFrame((state, delta) => {
+    if (!groupRef.current) return;
+
+    const remote = remoteRef.current;
+    if (remote.targetPosition) {
+      remote.position.lerp(remote.targetPosition, 1 - Math.exp(-delta * 10));
+    }
+
+    const visualSize = getRivalVisualSize(remote.size, playerRef.current.size);
+    const ground = getGroundHeight(remote.position.x, remote.position.z, worldPhase);
+    const bob = Math.sin(state.clock.elapsedTime * 5.6 + remote.tone * 8) * 0.025 * visualSize * (remote.walkAmount ?? 0);
+    groupRef.current.position.set(remote.position.x, ground + bob, remote.position.z);
+    groupRef.current.scale.setScalar(visualSize);
+    groupRef.current.rotation.y = remote.heading + Math.PI;
+  });
+
+  return (
+    <group ref={groupRef}>
+      <TRexModel size={0.8} motionRef={remoteRef} variant="enemy" tone={remotePlayer.tone} />
+    </group>
+  );
+}
+
 function Player({ playerRef, worldPhase }) {
   const groupRef = useRef(null);
 
@@ -2713,12 +2784,21 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
   const sceneryRef = useRef(createSceneryForPhase(0));
   const rivalsRef = useRef(initialRivals());
   const worldPhaseRef = useRef(0);
+  const multiplayerPlayerId = useMemo(() => loadMultiplayerPlayerId(), []);
+  const multiplayerTone = useMemo(() => getMultiplayerTone(multiplayerPlayerId), [multiplayerPlayerId]);
+  const multiplayerSpawnTokenRef = useRef(createUniqueId());
+  const remotePlayersRef = useRef([]);
+  const pendingEatClaimsRef = useRef(new Set());
+  const multiplayerStateInFlightRef = useRef(false);
+  const lastMultiplayerPostRef = useRef(0);
+  const sceneElapsedRef = useRef(0);
   const entityObjectRefs = useRef(new Map());
   const burstsRef = useRef([]);
   const [entitiesVersion, setEntitiesVersion] = useState(0);
   const [sceneryVersion, setSceneryVersion] = useState(0);
   const [rivalsVersion, setRivalsVersion] = useState(0);
   const [burstsVersion, setBurstsVersion] = useState(0);
+  const [remotePlayersVersion, setRemotePlayersVersion] = useState(0);
   const [worldPhase, setWorldPhase] = useState(0);
   const lastStatsRef = useRef(0);
   const tempVector = useMemo(() => new THREE.Vector3(), []);
@@ -2735,6 +2815,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       const size = player.size;
       const phase = getWorldPhase(size);
       const strength = Math.max(1, Math.pow(Math.max(1, safeNumber(size)), 1.42) * 12);
+      const visibleRemotePlayers = remotePlayersRef.current.filter((remotePlayer) => !remotePlayer.lost && remotePlayer.phase === phase).length;
       onStats({
         sizeLabel: `${formatMagnitude(size)}x`,
         strength: formatMagnitude(strength, 1),
@@ -2744,6 +2825,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         monkeys: player.monkeys,
         objects: player.objects,
         rivals: rivalsRef.current.length,
+        players: visibleRemotePlayers + 1,
         spawnDensity: `${getSpawnMultiplier(inputRef.current.spawnMultiplier)}x`,
         world: getPhaseLabel(phase),
       });
@@ -2758,6 +2840,179 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       entityObjectRefs.current.delete(id);
     }
   }, []);
+
+  const receiveMultiplayerSnapshot = useCallback(
+    (payload) => {
+      const rawPlayers = Array.isArray(payload?.players) ? payload.players : [];
+      const previousPlayers = new Map(remotePlayersRef.current.map((remotePlayer) => [remotePlayer.id, remotePlayer]));
+      const sceneElapsed = sceneElapsedRef.current;
+      const nextRemotePlayers = [];
+
+      for (const rawPlayer of rawPlayers) {
+        const id = String(rawPlayer?.id ?? '');
+        if (!id || id === multiplayerPlayerId) continue;
+
+        const size = clamp(safeNumber(Number(rawPlayer.size), START_SIZE), START_SIZE, MAX_LOGICAL_SIZE);
+        const phase = clamp(Math.round(safeNumber(Number(rawPlayer.phase), getWorldPhase(size))), 0, MAX_WORLD_PHASE);
+        const targetPosition = new THREE.Vector3(safeNumber(Number(rawPlayer.x), 0), 0, safeNumber(Number(rawPlayer.z), 0));
+        const previous = previousPlayers.get(id);
+        const position = previous?.position instanceof THREE.Vector3 ? previous.position : targetPosition.clone();
+        const munchUntil = rawPlayer.munching ? sceneElapsed + 0.34 : previous?.munchUntil ?? 0;
+
+        nextRemotePlayers.push({
+          id,
+          name: String(rawPlayer.name ?? 'Player'),
+          size,
+          phase,
+          heading: safeNumber(Number(rawPlayer.heading), previous?.heading ?? 0),
+          walkAmount: clamp(safeNumber(Number(rawPlayer.walkAmount), previous?.walkAmount ?? 0), 0, 1),
+          munchUntil,
+          lost: Boolean(rawPlayer.lost),
+          won: Boolean(rawPlayer.won),
+          tone: clamp(safeNumber(Number(rawPlayer.tone), previous?.tone ?? 0), 0, 1),
+          position,
+          targetPosition,
+          spawnToken: String(rawPlayer.spawnToken ?? ''),
+        });
+      }
+
+      remotePlayersRef.current = nextRemotePlayers;
+      setRemotePlayersVersion((value) => value + 1);
+      publishStats(true);
+    },
+    [multiplayerPlayerId, publishStats],
+  );
+
+  const publishMultiplayerState = useCallback(
+    (force = false) => {
+      const now = performance.now();
+      if (!force && now - lastMultiplayerPostRef.current < MULTIPLAYER_STATE_INTERVAL_MS) return;
+      if (!force && multiplayerStateInFlightRef.current) return;
+
+      const player = playerRef.current;
+      lastMultiplayerPostRef.current = now;
+      multiplayerStateInFlightRef.current = true;
+
+      fetch(`${MULTIPLAYER_API_PATH}/state`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: multiplayerPlayerId,
+          name: getMultiplayerPlayerName(),
+          x: player.position.x,
+          z: player.position.z,
+          size: player.size,
+          heading: player.heading,
+          walkAmount: player.walkAmount,
+          munching: safeNumber(player.munchUntil, 0) > sceneElapsedRef.current,
+          lost: player.lost,
+          won: player.won,
+          score: player.score,
+          tone: multiplayerTone,
+          spawnToken: multiplayerSpawnTokenRef.current,
+        }),
+      })
+        .catch(() => {})
+        .finally(() => {
+          multiplayerStateInFlightRef.current = false;
+        });
+    },
+    [multiplayerPlayerId, multiplayerTone],
+  );
+
+  const handleMultiplayerEaten = useCallback(
+    (eventPayload) => {
+      if (eventPayload?.targetId !== multiplayerPlayerId) return;
+      if (eventPayload.targetSpawnToken && eventPayload.targetSpawnToken !== multiplayerSpawnTokenRef.current) return;
+
+      const player = playerRef.current;
+      if (player.lost || player.won) return;
+
+      player.lost = true;
+      burstsRef.current.push({
+        id: `${multiplayerPlayerId}-multiplayer-eaten-${eventPayload.eatenAt ?? Date.now()}`,
+        x: player.position.x,
+        z: player.position.z,
+        y: Math.max(2.4, getVisualSize(player.size) * 1.3),
+        size: player.size,
+        kind: 'player',
+        createdAt: sceneElapsedRef.current,
+      });
+      setBurstsVersion((value) => value + 1);
+      onLose({
+        ...getPlayerSummary(player),
+        reason: `${eventPayload.eaterName || 'A bigger player'} ate you`,
+      });
+      publishStats(true);
+      publishMultiplayerState(true);
+    },
+    [multiplayerPlayerId, onLose, publishMultiplayerState, publishStats],
+  );
+
+  const claimMultiplayerEat = useCallback(
+    (targetPlayer, clockElapsed) => {
+      if (!targetPlayer?.id || pendingEatClaimsRef.current.has(targetPlayer.id)) return;
+
+      pendingEatClaimsRef.current.add(targetPlayer.id);
+      fetch(`${MULTIPLAYER_API_PATH}/eat`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          eaterId: multiplayerPlayerId,
+          targetId: targetPlayer.id,
+          spawnToken: multiplayerSpawnTokenRef.current,
+        }),
+      })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`Multiplayer eat returned ${response.status}`);
+          return response.json();
+        })
+        .then((payload) => {
+          const result = payload?.result;
+          if (!result?.targetId) return;
+
+          const player = playerRef.current;
+          if (player.lost || player.won) return;
+
+          const targetSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(Number(result.targetSize), targetPlayer.size));
+          const fallbackGrowth = Math.min(targetSize * 0.28, Math.max(0.45, player.size * 0.055));
+          const growth = Math.max(0, safeNumber(Number(result.growth), fallbackGrowth));
+          const localNextSize = addCappedGrowth(player.size, targetSize * 0.28, 0.055, 0.45);
+          player.score = Math.round(safeNumber(player.score, 0) + getEatScore('player', targetSize, player.size, growth));
+          player.size = Math.max(localNextSize, safeNumber(Number(result.eaterSize), localNextSize));
+          player.eaten += 1;
+          player.objects += 1;
+          player.munchUntil = clockElapsed + 0.62;
+          player.eatCooldown = getPlayerEatCooldown('player', player.size);
+
+          burstsRef.current.push({
+            id: `${targetPlayer.id}-player-eaten-burst-${player.eaten}`,
+            x: targetPlayer.position.x,
+            z: targetPlayer.position.z,
+            y: Math.max(2.2, getVisualSize(targetSize) * 1.2),
+            size: targetSize,
+            kind: 'player',
+            createdAt: clockElapsed,
+          });
+          remotePlayersRef.current = remotePlayersRef.current.filter((remotePlayer) => remotePlayer.id !== targetPlayer.id);
+          setRemotePlayersVersion((value) => value + 1);
+          setBurstsVersion((value) => value + 1);
+          publishStats(true);
+          publishMultiplayerState(true);
+        })
+        .catch(() => {})
+        .finally(() => {
+          pendingEatClaimsRef.current.delete(targetPlayer.id);
+        });
+    },
+    [multiplayerPlayerId, publishMultiplayerState, publishStats],
+  );
 
   const refillEntities = useCallback(() => {
     const entities = entitiesRef.current;
@@ -2796,6 +3051,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
   const resetGame = useCallback(() => {
     const requestedStartSize = Number.isFinite(startSize) ? clamp(startSize, START_SIZE, MAX_LOGICAL_SIZE) : getRequestedStartSize();
     const startPhase = getWorldPhase(requestedStartSize);
+    multiplayerSpawnTokenRef.current = createUniqueId();
+    pendingEatClaimsRef.current.clear();
     playerRef.current = {
       position: new THREE.Vector3(0, 0, 0),
       size: requestedStartSize,
@@ -2824,11 +3081,63 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     setRivalsVersion((value) => value + 1);
     setBurstsVersion((value) => value + 1);
     publishStats(true);
-  }, [publishStats, startSize]);
+    publishMultiplayerState(true);
+  }, [publishMultiplayerState, publishStats, startSize]);
 
   useEffect(() => {
     resetGame();
   }, [resetGame, resetToken]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetchMultiplayerSnapshot(controller.signal)
+      .then(receiveMultiplayerSnapshot)
+      .catch(() => {});
+
+    let eventSource = null;
+    if (typeof window !== 'undefined' && typeof window.EventSource === 'function') {
+      eventSource = new EventSource(`${MULTIPLAYER_API_PATH}/events`);
+      eventSource.addEventListener('snapshot', (event) => {
+        try {
+          receiveMultiplayerSnapshot(JSON.parse(event.data));
+        } catch {
+          // Ignore malformed multiplayer packets.
+        }
+      });
+      eventSource.addEventListener('eaten', (event) => {
+        try {
+          handleMultiplayerEaten(JSON.parse(event.data));
+        } catch {
+          // Ignore malformed multiplayer packets.
+        }
+      });
+    }
+
+    const poll = window.setInterval(() => {
+      fetchMultiplayerSnapshot(controller.signal)
+        .then(receiveMultiplayerSnapshot)
+        .catch(() => {});
+    }, MULTIPLAYER_SNAPSHOT_POLL_MS);
+
+    return () => {
+      controller.abort();
+      window.clearInterval(poll);
+      eventSource?.close();
+
+      const body = JSON.stringify({ id: multiplayerPlayerId });
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(`${MULTIPLAYER_API_PATH}/leave`, new Blob([body], { type: 'application/json' }));
+      } else {
+        fetch(`${MULTIPLAYER_API_PATH}/leave`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        }).catch(() => {});
+      }
+    };
+  }, [handleMultiplayerEaten, multiplayerPlayerId, receiveMultiplayerSnapshot]);
 
   useEffect(() => {
     gl.setClearColor('#9fd7f7', 1);
@@ -2836,6 +3145,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
 
   useFrame((state, delta) => {
     const player = playerRef.current;
+    sceneElapsedRef.current = state.clock.elapsedTime;
     const dt = Math.min(delta, 0.28);
     if (!pausedRef.current && !player.won && !player.lost) {
       player.elapsedSeconds = safeNumber(player.elapsedSeconds, 0) + dt;
@@ -3264,6 +3574,23 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         }
       }
 
+      if (!player.won && !playerWasEaten && (player.eatCooldown ?? 0) <= 0) {
+        for (const remotePlayer of remotePlayersRef.current) {
+          if (remotePlayer.lost || remotePlayer.won || remotePlayer.phase !== worldPhaseRef.current) continue;
+          if (pendingEatClaimsRef.current.has(remotePlayer.id)) continue;
+
+          const remoteRadius = Math.max(0.55, getRivalVisualSize(remotePlayer.size, player.size) * 0.68);
+          const dist = remotePlayer.position.distanceTo(player.position);
+          const collision = dist < (playerRadius + remoteRadius) * 0.82;
+          const playerCanEat = player.size >= remotePlayer.size * PLAYER_EAT_PLAYER_RATIO;
+
+          if (collision && playerCanEat) {
+            claimMultiplayerEat(remotePlayer, state.clock.elapsedTime);
+            break;
+          }
+        }
+      }
+
       if (rivalsChanged) {
         setRivalsVersion((value) => value + 1);
       }
@@ -3284,6 +3611,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         setBurstsVersion((value) => value + 1);
       }
     }
+
+    publishMultiplayerState();
 
     const visualSize = getVisualSize(player.size);
     const worldLimit = getWorldLimit(worldPhaseRef.current);
@@ -3345,10 +3674,12 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
   const entities = entitiesRef.current;
   const scenery = sceneryRef.current;
   const rivals = rivalsRef.current;
+  const remotePlayers = remotePlayersRef.current.filter((remotePlayer) => !remotePlayer.lost && !remotePlayer.won && remotePlayer.phase === worldPhase);
   const bursts = burstsRef.current;
   void entitiesVersion;
   void sceneryVersion;
   void rivalsVersion;
+  void remotePlayersVersion;
   void burstsVersion;
 
   return (
@@ -3365,6 +3696,9 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         <FloatingEntity key={entity.id} entity={entity} registerEntityRef={registerEntityRef} playerSize={playerRef.current.size} worldPhase={worldPhase} />
       ))}
       {worldPhase < 4 && rivals.map((rival) => <RivalRex key={rival.id} rival={rival} playerSize={playerRef.current.size} worldPhase={worldPhase} />)}
+      {remotePlayers.map((remotePlayer) => (
+        <RemotePlayer key={remotePlayer.id} remotePlayer={remotePlayer} playerRef={playerRef} worldPhase={worldPhase} />
+      ))}
       {bursts.map((burst) => (
         <EatBurst key={burst.id} burst={burst} worldPhase={worldPhase} />
       ))}
@@ -3512,7 +3846,7 @@ function LosePanel({ result, onRestart }) {
   return (
     <div className="end-panel danger" role="dialog" aria-modal="true" aria-labelledby="lose-title">
       <strong id="lose-title">YOU WERE EATEN</strong>
-      <span>A larger rival T-Rex got you</span>
+      <span>{result?.reason || 'A larger rival T-Rex got you'}</span>
       <RunSummary result={result} />
       <button className="primary-button restart-button" type="button" onClick={onRestart}>
         <RotateCcw size={16} />
@@ -3563,6 +3897,7 @@ function App() {
     monkeys: 0,
     objects: 0,
     rivals: 3,
+    players: 1,
     spawnDensity: `${DEFAULT_SPAWN_MULTIPLIER}x`,
     world: 'Country',
   });

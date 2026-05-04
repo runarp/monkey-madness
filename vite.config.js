@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { execSync } from 'node:child_process';
+import { handleMultiplayerApi } from './server/multiplayer.mjs';
 import { handleScoresApi } from './server/scores.mjs';
 
 const readGitValue = (command, fallback = 'unknown') => {
@@ -18,11 +19,12 @@ const appVersion = {
 };
 
 const scoresApiPlugin = () => ({
-  name: 'monkey-madness-scores-api',
+  name: 'monkey-madness-api',
   configureServer(server) {
     server.middlewares.use(async (request, response, next) => {
       try {
         if (await handleScoresApi(request, response)) return;
+        if (await handleMultiplayerApi(request, response)) return;
         next();
       } catch (error) {
         next(error);
@@ -33,6 +35,7 @@ const scoresApiPlugin = () => ({
     server.middlewares.use(async (request, response, next) => {
       try {
         if (await handleScoresApi(request, response)) return;
+        if (await handleMultiplayerApi(request, response)) return;
         next();
       } catch (error) {
         next(error);

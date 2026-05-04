@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { handleMultiplayerApi } from './server/multiplayer.mjs';
 import { handleScoresApi } from './server/scores.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -88,6 +89,7 @@ const serveStatic = async (request, response) => {
 const server = http.createServer(async (request, response) => {
   try {
     if (await handleScoresApi(request, response)) return;
+    if (await handleMultiplayerApi(request, response)) return;
     await serveStatic(request, response);
   } catch (error) {
     console.error(error);

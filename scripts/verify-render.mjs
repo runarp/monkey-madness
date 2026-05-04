@@ -36,7 +36,7 @@ for (const viewport of scenarios) {
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   const url = viewport.startSize ? `${baseUrl}?startSize=${viewport.startSize}` : baseUrl;
-  await page.goto(url, { waitUntil: 'networkidle' });
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.locator('canvas').waitFor({ state: 'visible' });
   await page.waitForTimeout(120);
   const debugSpawn = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);

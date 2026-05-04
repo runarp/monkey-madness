@@ -10,6 +10,8 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 - Start with tiny snacks like ants, worms, flowers, brush, and signposts.
 - Grow into eating trees, cars, houses, buildings, towers, mountains, and eventually planet-scale objects.
 - Avoid larger rival T-Rex enemies. They can eat you if they are big enough.
+- Multiplayer is on by default for everyone connected to the same running host.
+  Players in the same world phase can see and eat each other.
 - Use the spawn cheat to add more food and grow faster.
 
 ## Controls
@@ -45,9 +47,11 @@ Run the game:
 npm run dev
 ```
 
-The development server includes a tiny `/api/scores` backend. Finished runs are
-saved to `data/top-scores.yml` by default, which makes the leaderboard shared for
-everyone using the same running server. Override the file location with
+The development server includes tiny `/api/scores` and `/api/multiplayer`
+backends. Finished runs are saved to `data/top-scores.yml` by default, which
+makes the leaderboard shared for everyone using the same running server. Live
+players are shared in memory across browsers connected to the host that served
+the page. Override the score file location with
 `SCORES_FILE=/path/to/top-scores.yml` if needed.
 
 Build:
