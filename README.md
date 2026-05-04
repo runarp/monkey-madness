@@ -45,10 +45,21 @@ Run the game:
 npm run dev
 ```
 
+The development server includes a tiny `/api/scores` backend. Finished runs are
+saved to `data/top-scores.yml` by default, which makes the leaderboard shared for
+everyone using the same running server. Override the file location with
+`SCORES_FILE=/path/to/top-scores.yml` if needed.
+
 Build:
 
 ```bash
 npm run build
+```
+
+Run the built game with the score backend:
+
+```bash
+npm start
 ```
 
 Render verification:
