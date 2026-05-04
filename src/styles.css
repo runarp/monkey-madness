@@ -71,7 +71,7 @@ input {
 
 .stat-panel {
   display: grid;
-  grid-template-columns: repeat(10, minmax(66px, max-content));
+  grid-template-columns: repeat(11, minmax(66px, max-content));
   gap: 2px;
   padding: 8px;
 }
