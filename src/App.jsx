@@ -21,6 +21,7 @@ const MAX_SCENERY_EATS_PER_FRAME = 1;
 const ENTITY_GROWTH_CAP_RATIO = 0.045;
 const SCENERY_GROWTH_CAP_RATIO = 0.045;
 const SPAWN_EDIBLE_SIZE_RATIO = 0.9;
+const SCORE_API_PATH = '/api/scores';
 const LEADERBOARD_STORAGE_KEY = 'monkey-madness:top-scores:v1';
 const LAST_PLAYER_NAME_KEY = 'monkey-madness:last-player-name';
 const MAX_LEADERBOARD_ENTRIES = 8;
@@ -398,6 +399,38 @@ const loadLastPlayerName = () => {
 const saveLastPlayerName = (name) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(LAST_PLAYER_NAME_KEY, name);
+};
+
+const parseScoresResponse = (payload) => rankLeaderboard(Array.isArray(payload?.scores) ? payload.scores : []);
+
+const fetchSharedLeaderboard = async (signal) => {
+  const response = await fetch(SCORE_API_PATH, {
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Score API returned ${response.status}`);
+  }
+
+  return parseScoresResponse(await response.json());
+};
+
+const submitSharedScore = async ({ name, points, durationSeconds }) => {
+  const response = await fetch(SCORE_API_PATH, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name, points, durationSeconds }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Score API returned ${response.status}`);
+  }
+
+  return parseScoresResponse(await response.json());
 };
 
 const getPlayerSummary = (player) => ({
@@ -3402,7 +3435,7 @@ function RunSummary({ result }) {
   );
 }
 
-function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, onSaveScore, onRestart }) {
+function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice, leaderboard, onNameChange, onSaveScore, onRestart }) {
   const cleanName = sanitizePlayerName(playerName);
   const nameInputRef = useRef(null);
 
@@ -3445,13 +3478,14 @@ function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, o
               maxLength={MAX_PLAYER_NAME_LENGTH}
               autoComplete="off"
               autoFocus
+              disabled={scoreSaving}
               inputMode="text"
               enterKeyHint="done"
               onChange={(event) => onNameChange(event.target.value)}
             />
-            <button className="primary-button" type="submit" disabled={!cleanName}>
+            <button className="primary-button" type="submit" disabled={scoreSaving || !cleanName}>
               <Save size={16} />
-              Save
+              {scoreSaving ? 'Saving' : 'Save'}
             </button>
           </div>
         </form>
@@ -3461,6 +3495,7 @@ function WinPanel({ result, playerName, scoreSaved, leaderboard, onNameChange, o
           Play Again
         </button>
       )}
+      {scoreSaveNotice && <p className="score-notice">{scoreSaveNotice}</p>}
 
       <div className="end-leaderboard">
         <div className="leaderboard-title">
@@ -3538,10 +3573,29 @@ function App() {
   const [leaderboard, setLeaderboard] = useState(() => loadLeaderboard());
   const [playerName, setPlayerName] = useState(() => loadLastPlayerName());
   const [scoreSaved, setScoreSaved] = useState(false);
+  const [scoreSaving, setScoreSaving] = useState(false);
+  const [scoreSaveNotice, setScoreSaveNotice] = useState('');
   const [resetToken, setResetToken] = useState(0);
   const pausedRef = useRef(false);
 
   useKeyboardInput(inputRef);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetchSharedLeaderboard(controller.signal)
+      .then((entries) => {
+        setLeaderboard(entries);
+        saveLeaderboard(entries);
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') {
+          console.warn('Shared leaderboard is unavailable; using local scores.', error);
+        }
+      });
+
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -3571,6 +3625,8 @@ function App() {
     setGameLost(false);
     setRunResult(null);
     setScoreSaved(false);
+    setScoreSaving(false);
+    setScoreSaveNotice('');
     pausedRef.current = false;
     setResetToken((value) => value + 1);
   };
@@ -3595,26 +3651,48 @@ function App() {
     setPlayerName(value.slice(0, MAX_PLAYER_NAME_LENGTH));
   };
 
-  const saveScore = (event) => {
+  const saveScore = async (event) => {
     event.preventDefault();
-    if (!runResult) return;
+    if (!runResult || scoreSaving) return;
 
     const cleanName = sanitizePlayerName(playerName);
     if (!cleanName) return;
 
-    const entry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    const scorePayload = {
       name: cleanName,
       points: Math.round(runResult.points),
       durationSeconds: runResult.durationSeconds,
-      completedAt: new Date().toISOString(),
     };
-    const nextLeaderboard = rankLeaderboard([...leaderboard, entry]);
-    saveLeaderboard(nextLeaderboard);
-    saveLastPlayerName(cleanName);
-    setPlayerName(cleanName);
-    setLeaderboard(nextLeaderboard);
-    setScoreSaved(true);
+
+    setScoreSaving(true);
+    setScoreSaveNotice('');
+
+    try {
+      const nextLeaderboard = await submitSharedScore(scorePayload);
+      saveLeaderboard(nextLeaderboard);
+      saveLastPlayerName(cleanName);
+      setPlayerName(cleanName);
+      setLeaderboard(nextLeaderboard);
+      setScoreSaved(true);
+    } catch (error) {
+      console.warn('Shared score save failed; saving locally instead.', error);
+      const entry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: cleanName,
+        points: scorePayload.points,
+        durationSeconds: scorePayload.durationSeconds,
+        completedAt: new Date().toISOString(),
+      };
+      const nextLeaderboard = rankLeaderboard([...leaderboard, entry]);
+      saveLeaderboard(nextLeaderboard);
+      saveLastPlayerName(cleanName);
+      setPlayerName(cleanName);
+      setLeaderboard(nextLeaderboard);
+      setScoreSaved(true);
+      setScoreSaveNotice('Server unavailable. Saved on this device only.');
+    } finally {
+      setScoreSaving(false);
+    }
   };
 
   const onWheel = (event) => {
@@ -3695,6 +3773,8 @@ function App() {
           result={runResult}
           playerName={playerName}
           scoreSaved={scoreSaved}
+          scoreSaving={scoreSaving}
+          scoreSaveNotice={scoreSaveNotice}
           leaderboard={leaderboard}
           onNameChange={handlePlayerNameChange}
           onSaveScore={saveScore}

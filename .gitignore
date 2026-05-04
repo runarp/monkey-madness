@@ -1,4 +1,7 @@
 node_modules/
 dist/
 artifacts/
+data/*.yml
+data/*.yaml
+!data/.gitkeep
 .DS_Store

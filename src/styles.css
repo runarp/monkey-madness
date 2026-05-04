@@ -394,6 +394,13 @@ input {
   outline-offset: 2px;
 }
 
+.score-notice {
+  margin: 0;
+  color: #ffd98a;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .primary-button {
   min-height: 40px;
   display: inline-flex;
