@@ -9,6 +9,7 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 - Move around and eat things smaller than you.
 - Start with tiny snacks like ants, worms, flowers, brush, and signposts.
 - Grow into eating trees, cars, houses, buildings, towers, mountains, and eventually planet-scale objects.
+- After the globe scale, jump into orbit, eat the Moon, cross a compressed solar system, consume planets, asteroid belts, the Sun, and nearby star systems until the galaxy comes into view.
 - Avoid larger rival T-Rex enemies. They can eat you if they are big enough.
 - Use the spawn cheat to add more food and grow faster.
 
