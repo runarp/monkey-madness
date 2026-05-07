@@ -419,8 +419,6 @@ const loadMultiplayerPlayerId = () => {
   return id;
 };
 
-const getMultiplayerPlayerName = () => sanitizePlayerName(loadLastPlayerName()) || 'Player';
-
 const getMultiplayerTone = (id) => {
   let hash = 0;
   for (const char of String(id)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
@@ -1180,8 +1178,14 @@ const createSceneryForPhase = (phase) => (phase >= 4 ? createGlobeScenery() : ge
 function useKeyboardInput(inputRef) {
   useEffect(() => {
     const pressed = new Set();
+    const isTypingTarget = (target) => {
+      if (!(target instanceof HTMLElement)) return false;
+      return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable;
+    };
 
     const onKeyDown = (event) => {
+      if (isTypingTarget(event.target)) return;
+
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(event.code)) {
         pressed.add(event.code);
         event.preventDefault();
@@ -2566,6 +2570,50 @@ function RivalRex({ rival, playerSize, worldPhase }) {
   );
 }
 
+function NameTag({ name }) {
+  const cleanName = sanitizePlayerName(name) || 'Player';
+  const spriteRef = useRef(null);
+  const texture = useMemo(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 72;
+    const context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = 'rgba(20, 32, 28, 0.78)';
+    context.strokeStyle = 'rgba(255, 255, 255, 0.52)';
+    context.lineWidth = 3;
+    context.beginPath();
+    context.roundRect(8, 10, 240, 52, 12);
+    context.fill();
+    context.stroke();
+    context.fillStyle = '#fff7db';
+    context.font = '700 28px Inter, system-ui, sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(cleanName, 128, 37, 208);
+
+    const nextTexture = new THREE.CanvasTexture(canvas);
+    nextTexture.colorSpace = THREE.SRGBColorSpace;
+    nextTexture.needsUpdate = true;
+    return nextTexture;
+  }, [cleanName]);
+
+  useEffect(() => () => texture.dispose(), [texture]);
+
+  useFrame(() => {
+    if (!spriteRef.current) return;
+    const visualSize = Math.max(0.35, safeNumber(spriteRef.current.parent?.scale.x, 1));
+    const width = clamp(10 + Math.sqrt(visualSize) * 2.4, 10, 32);
+    spriteRef.current.scale.set(width / visualSize, (width * 0.28) / visualSize, 1);
+  });
+
+  return (
+    <sprite ref={spriteRef} position={[0, 4.1, 0]}>
+      <spriteMaterial map={texture} transparent depthWrite={false} depthTest={false} />
+    </sprite>
+  );
+}
+
 function RemotePlayer({ remotePlayer, playerRef, worldPhase }) {
   const groupRef = useRef(null);
   const remoteRef = useRef(remotePlayer);
@@ -2590,6 +2638,7 @@ function RemotePlayer({ remotePlayer, playerRef, worldPhase }) {
   return (
     <group ref={groupRef}>
       <TRexModel size={0.8} motionRef={remoteRef} variant="enemy" tone={remotePlayer.tone} />
+      <NameTag name={remotePlayer.name} />
     </group>
   );
 }
@@ -2761,7 +2810,7 @@ function WorldTiles({ phase, won }) {
   );
 }
 
-function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin, onLose, gameWon, gameLost }) {
+function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, playerReady, onStats, onWin, onLose, gameWon, gameLost }) {
   const { camera, gl } = useThree();
   const playerRef = useRef({
     position: new THREE.Vector3(0, 0, 0),
@@ -2885,6 +2934,9 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
 
   const publishMultiplayerState = useCallback(
     (force = false) => {
+      const cleanName = sanitizePlayerName(playerName);
+      if (!playerReady || !cleanName) return;
+
       const now = performance.now();
       if (!force && now - lastMultiplayerPostRef.current < MULTIPLAYER_STATE_INTERVAL_MS) return;
       if (!force && multiplayerStateInFlightRef.current) return;
@@ -2901,7 +2953,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         },
         body: JSON.stringify({
           id: multiplayerPlayerId,
-          name: getMultiplayerPlayerName(),
+          name: cleanName,
           x: player.position.x,
           z: player.position.z,
           size: player.size,
@@ -2920,7 +2972,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
           multiplayerStateInFlightRef.current = false;
         });
     },
-    [multiplayerPlayerId, multiplayerTone],
+    [multiplayerPlayerId, multiplayerTone, playerName, playerReady],
   );
 
   const handleMultiplayerEaten = useCallback(
@@ -3081,14 +3133,15 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     setRivalsVersion((value) => value + 1);
     setBurstsVersion((value) => value + 1);
     publishStats(true);
-    publishMultiplayerState(true);
-  }, [publishMultiplayerState, publishStats, startSize]);
+  }, [publishStats, startSize]);
 
   useEffect(() => {
     resetGame();
   }, [resetGame, resetToken]);
 
   useEffect(() => {
+    if (!playerReady) return undefined;
+
     const controller = new AbortController();
 
     fetchMultiplayerSnapshot(controller.signal)
@@ -3137,7 +3190,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
         }).catch(() => {});
       }
     };
-  }, [handleMultiplayerEaten, multiplayerPlayerId, receiveMultiplayerSnapshot]);
+  }, [handleMultiplayerEaten, multiplayerPlayerId, playerReady, receiveMultiplayerSnapshot]);
 
   useEffect(() => {
     gl.setClearColor('#9fd7f7', 1);
@@ -3147,7 +3200,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     const player = playerRef.current;
     sceneElapsedRef.current = state.clock.elapsedTime;
     const dt = Math.min(delta, 0.28);
-    if (!pausedRef.current && !player.won && !player.lost) {
+    if (playerReady && !pausedRef.current && !player.won && !player.lost) {
       player.elapsedSeconds = safeNumber(player.elapsedSeconds, 0) + dt;
     }
     const activePhase = getWorldPhase(player.size);
@@ -3176,7 +3229,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       publishStats(true);
     }
 
-    if (!pausedRef.current && !player.lost) {
+    if (playerReady && !pausedRef.current && !player.lost) {
       const keyboard = inputRef.current.keyboard;
       const touch = inputRef.current.touch;
       const dx = Math.abs(touch.x) > 0.04 || Math.abs(touch.y) > 0.04 ? touch.x : keyboard.x;
@@ -3612,7 +3665,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
       }
     }
 
-    publishMultiplayerState();
+    if (playerReady) publishMultiplayerState();
 
     const visualSize = getVisualSize(player.size);
     const worldLimit = getWorldLimit(worldPhaseRef.current);
@@ -3769,30 +3822,8 @@ function RunSummary({ result }) {
   );
 }
 
-function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice, leaderboard, onNameChange, onSaveScore, onRestart }) {
+function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice, leaderboard, onSaveScore, onRestart }) {
   const cleanName = sanitizePlayerName(playerName);
-  const nameInputRef = useRef(null);
-
-  useEffect(() => {
-    if (scoreSaved) return undefined;
-
-    const focusNameInput = () => {
-      const input = nameInputRef.current;
-      if (!input) return;
-      input.focus({ preventScroll: true });
-      input.select();
-      navigator.virtualKeyboard?.show?.();
-    };
-
-    focusNameInput();
-    const raf = requestAnimationFrame(focusNameInput);
-    const timeouts = [140, 420].map((delay) => window.setTimeout(focusNameInput, delay));
-
-    return () => {
-      cancelAnimationFrame(raf);
-      timeouts.forEach((timeout) => window.clearTimeout(timeout));
-    };
-  }, [scoreSaved]);
 
   return (
     <div className="end-panel win-panel" role="dialog" aria-modal="true" aria-labelledby="win-title">
@@ -3801,28 +3832,16 @@ function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice
       <RunSummary result={result} />
 
       {!scoreSaved ? (
-        <form className="score-form" onSubmit={onSaveScore}>
-          <label htmlFor="player-name">Name</label>
+        <div className="score-form auto-score">
+          <label>Top score name</label>
           <div className="score-form-row">
-            <input
-              ref={nameInputRef}
-              id="player-name"
-              type="text"
-              value={playerName}
-              maxLength={MAX_PLAYER_NAME_LENGTH}
-              autoComplete="off"
-              autoFocus
-              disabled={scoreSaving}
-              inputMode="text"
-              enterKeyHint="done"
-              onChange={(event) => onNameChange(event.target.value)}
-            />
-            <button className="primary-button" type="submit" disabled={scoreSaving || !cleanName}>
+            <strong className="score-player-name">{cleanName}</strong>
+            <button className="primary-button" type="button" onClick={onSaveScore} disabled={scoreSaving || !cleanName}>
               <Save size={16} />
               {scoreSaving ? 'Saving' : 'Save'}
             </button>
           </div>
-        </form>
+        </div>
       ) : (
         <button className="primary-button restart-button" type="button" onClick={onRestart}>
           <RotateCcw size={16} />
@@ -3839,6 +3858,57 @@ function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice
         <LeaderboardTable entries={leaderboard.slice(0, 5)} compact />
       </div>
     </div>
+  );
+}
+
+function CharacterNamePanel({ playerName, onNameChange, onStart }) {
+  const cleanName = sanitizePlayerName(playerName);
+  const nameInputRef = useRef(null);
+
+  useEffect(() => {
+    const focusNameInput = () => {
+      const input = nameInputRef.current;
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      input.select();
+      navigator.virtualKeyboard?.show?.();
+    };
+
+    focusNameInput();
+    const raf = requestAnimationFrame(focusNameInput);
+    const timeouts = [140, 420].map((delay) => window.setTimeout(focusNameInput, delay));
+
+    return () => {
+      cancelAnimationFrame(raf);
+      timeouts.forEach((timeout) => window.clearTimeout(timeout));
+    };
+  }, []);
+
+  return (
+    <form className="end-panel start-panel" role="dialog" aria-modal="true" aria-labelledby="start-title" onSubmit={onStart}>
+      <strong id="start-title">NAME YOUR T-REX</strong>
+      <div className="score-form">
+        <label htmlFor="character-name">Name</label>
+        <div className="score-form-row">
+          <input
+            ref={nameInputRef}
+            id="character-name"
+            type="text"
+            value={playerName}
+            maxLength={MAX_PLAYER_NAME_LENGTH}
+            autoComplete="off"
+            autoFocus
+            inputMode="text"
+            enterKeyHint="go"
+            onChange={(event) => onNameChange(event.target.value)}
+          />
+          <button className="primary-button" type="submit" disabled={!cleanName}>
+            <Play size={16} />
+            Start
+          </button>
+        </div>
+      </div>
+    </form>
   );
 }
 
@@ -3901,7 +3971,8 @@ function App() {
     spawnDensity: `${DEFAULT_SPAWN_MULTIPLIER}x`,
     world: 'Country',
   });
-  const [paused, setPaused] = useState(false);
+  const [paused, setPaused] = useState(true);
+  const [playerReady, setPlayerReady] = useState(false);
   const [gameWon, setGameWon] = useState(false);
   const [gameLost, setGameLost] = useState(false);
   const [runResult, setRunResult] = useState(null);
@@ -3911,7 +3982,7 @@ function App() {
   const [scoreSaving, setScoreSaving] = useState(false);
   const [scoreSaveNotice, setScoreSaveNotice] = useState('');
   const [resetToken, setResetToken] = useState(0);
-  const pausedRef = useRef(false);
+  const pausedRef = useRef(true);
 
   useKeyboardInput(inputRef);
 
@@ -3937,7 +4008,20 @@ function App() {
   }, [paused]);
 
   const togglePause = () => {
+    if (!playerReady) return;
     setPaused((value) => !value);
+  };
+
+  const startGame = (event) => {
+    event.preventDefault();
+    const cleanName = sanitizePlayerName(playerName);
+    if (!cleanName) return;
+
+    saveLastPlayerName(cleanName);
+    setPlayerName(cleanName);
+    setPlayerReady(true);
+    setPaused(false);
+    pausedRef.current = false;
   };
 
   const reset = () => {
@@ -3955,14 +4039,14 @@ function App() {
       lastX: 0,
       lastY: 0,
     });
-    setPaused(false);
+    setPaused(!playerReady);
     setGameWon(false);
     setGameLost(false);
     setRunResult(null);
     setScoreSaved(false);
     setScoreSaving(false);
     setScoreSaveNotice('');
-    pausedRef.current = false;
+    pausedRef.current = !playerReady;
     setResetToken((value) => value + 1);
   };
 
@@ -3986,8 +4070,8 @@ function App() {
     setPlayerName(value.slice(0, MAX_PLAYER_NAME_LENGTH));
   };
 
-  const saveScore = async (event) => {
-    event.preventDefault();
+  const saveScore = useCallback(async (event) => {
+    event?.preventDefault();
     if (!runResult || scoreSaving) return;
 
     const cleanName = sanitizePlayerName(playerName);
@@ -4028,7 +4112,13 @@ function App() {
     } finally {
       setScoreSaving(false);
     }
-  };
+  }, [leaderboard, playerName, runResult, scoreSaving]);
+
+  useEffect(() => {
+    if (!gameWon || !playerReady || !runResult || scoreSaved || scoreSaving) return;
+    if (!sanitizePlayerName(playerName)) return;
+    saveScore();
+  }, [gameWon, playerName, playerReady, runResult, saveScore, scoreSaved, scoreSaving]);
 
   const onWheel = (event) => {
     const controls = inputRef.current.camera;
@@ -4090,6 +4180,8 @@ function App() {
           pausedRef={pausedRef}
           resetToken={resetToken}
           startSize={resetToken === 0 ? initialStartSizeRef.current : START_SIZE}
+          playerName={playerName}
+          playerReady={playerReady}
           onStats={setStats}
           onWin={handleWin}
           onLose={handleLose}
@@ -4103,6 +4195,13 @@ function App() {
       <TouchJoystick inputRef={inputRef} mode="move" ariaLabel="Move" />
       <TouchJoystick inputRef={inputRef} mode="camera" ariaLabel="Camera angle" />
       {paused && <div className="pause-scrim" aria-hidden="true" />}
+      {!playerReady && (
+        <CharacterNamePanel
+          playerName={playerName}
+          onNameChange={handlePlayerNameChange}
+          onStart={startGame}
+        />
+      )}
       {gameWon && (
         <WinPanel
           result={runResult}
@@ -4111,7 +4210,6 @@ function App() {
           scoreSaving={scoreSaving}
           scoreSaveNotice={scoreSaveNotice}
           leaderboard={leaderboard}
-          onNameChange={handlePlayerNameChange}
           onSaveScore={saveScore}
           onRestart={reset}
         />
