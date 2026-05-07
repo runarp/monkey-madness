@@ -32,6 +32,16 @@ const MULTIPLAYER_STATE_INTERVAL_MS = 90;
 const MULTIPLAYER_SNAPSHOT_POLL_MS = 2500;
 const GLOBE_RADIUS = 8200;
 const GLOBE_WORLD_LIMIT = GLOBE_RADIUS * 0.92;
+const GLOBE_CENTER_Y = -GLOBE_RADIUS + 8;
+const GLOBE_SCENERY_RADIUS_LIMIT = GLOBE_RADIUS * 0.68;
+const GLOBE_LOCAL_UP = new THREE.Vector3(0, 1, 0);
+const GLOBE_SCENERY_SCALE_BY_KIND = {
+  tree: 3.0,
+  house: 2.45,
+  building: 2.05,
+  tower: 1.95,
+  mountain: 1.08,
+};
 const CAMERA_ZOOM_MIN = 0.42;
 const CAMERA_ZOOM_MAX = 2.35;
 const CAMERA_PITCH_MIN = -0.34;
@@ -495,13 +505,60 @@ const terrainHeight = (x, z) => {
   return low + ripple;
 };
 
-const getGlobeSurfaceHeight = (x, z) => {
+const getGlobeSurfaceYFromCenter = (x, z) => {
   const distanceSq = x * x + z * z;
-  const surface = Math.sqrt(Math.max(0, GLOBE_RADIUS * GLOBE_RADIUS - distanceSq));
-  return -GLOBE_RADIUS + 8 + surface;
+  return Math.sqrt(Math.max(0, GLOBE_RADIUS * GLOBE_RADIUS - distanceSq));
+};
+
+const getGlobeSurfaceHeight = (x, z) => {
+  return GLOBE_CENTER_Y + getGlobeSurfaceYFromCenter(x, z);
 };
 
 const getGroundHeight = (x, z, phase = 0) => (phase >= 4 ? getGlobeSurfaceHeight(x, z) : terrainHeight(x, z));
+
+const getGlobeSurfaceNormal = (x, z, target = new THREE.Vector3()) =>
+  target.set(x, getGlobeSurfaceYFromCenter(x, z), z).normalize();
+
+const getGlobeLandScoreFromNormal = (x, y, z) => {
+  return (
+    Math.sin(x * 5.1 + z * 2.7 + y * 1.6) +
+    Math.cos(z * 4.8 - x * 3.4 + y * 2.3) * 0.72 +
+    Math.sin((x + z) * 7.2 - y * 1.9) * 0.42 +
+    Math.cos((x - z) * 9.5 + y * 0.8) * 0.24
+  );
+};
+
+const getGlobeLandScore = (x, z) => {
+  const normal = getGlobeSurfaceNormal(x, z);
+  return getGlobeLandScoreFromNormal(normal.x, normal.y, normal.z);
+};
+
+const isGlobeLandAt = (x, z) => getGlobeLandScore(x, z) > 0.18;
+
+const getGlobeSurfaceQuaternion = (x, z, yaw = 0, scratch = {}) => {
+  const normal = scratch.normal || (scratch.normal = new THREE.Vector3());
+  const align = scratch.align || (scratch.align = new THREE.Quaternion());
+  const twist = scratch.twist || (scratch.twist = new THREE.Quaternion());
+
+  getGlobeSurfaceNormal(x, z, normal);
+  align.setFromUnitVectors(GLOBE_LOCAL_UP, normal);
+  twist.setFromAxisAngle(GLOBE_LOCAL_UP, yaw);
+  return align.multiply(twist);
+};
+
+const setObjectOnSurface = (object, x, z, phase = 0, yaw = 0, lift = 0, scratch = {}) => {
+  if (phase >= 4) {
+    const normal = scratch.normal || (scratch.normal = new THREE.Vector3());
+
+    getGlobeSurfaceNormal(x, z, normal);
+    object.position.set(x, getGlobeSurfaceHeight(x, z), z).addScaledVector(normal, lift);
+    object.quaternion.copy(getGlobeSurfaceQuaternion(x, z, yaw, scratch));
+    return;
+  }
+
+  object.position.set(x, terrainHeight(x, z) + lift, z);
+  object.rotation.set(0, yaw, 0);
+};
 
 const constrainToWorld = (x, z, phase = 0) => {
   if (phase < 4) {
@@ -921,30 +978,51 @@ const initialRivals = (playerSize = START_SIZE, phase = 0) => {
   return Array.from({ length: count }, (_, index) => makeRivalRex(index, origin, playerSize, phase));
 };
 
-const createGlobeScenery = () => {
-  const items = [];
-  const maxRadius = GLOBE_RADIUS * 0.58;
-
-  for (let i = 0; i < 44; i += 1) {
-    const seed = 8000 + i * 97;
-    const angle = seeded(seed) * Math.PI * 2;
-    const distance = maxRadius * Math.sqrt(seeded(seed + 17));
+const findGlobeLandPosition = (seed, minRadius = GLOBE_RADIUS * 0.08, maxRadius = GLOBE_SCENERY_RADIUS_LIMIT) => {
+  for (let attempt = 0; attempt < 36; attempt += 1) {
+    const angle = seeded(seed + attempt * 19.7) * Math.PI * 2;
+    const distance = minRadius + Math.sqrt(seeded(seed + attempt * 31.1)) * (maxRadius - minRadius);
     const x = Math.cos(angle) * distance;
     const z = Math.sin(angle) * distance;
+    if (isGlobeLandAt(x, z)) return { x, z };
+  }
+
+  const angle = seeded(seed + 991) * Math.PI * 2;
+  const distance = GLOBE_RADIUS * (0.18 + seeded(seed + 997) * 0.26);
+  return { x: Math.cos(angle) * distance, z: Math.sin(angle) * distance };
+};
+
+const makeGlobeMountainObject = (id, x, z, seed) => {
+  const radius = 18 + seeded(seed + 3) * 38;
+  const height = 34 + seeded(seed + 5) * 78;
+  const logicalSize = 145 + seeded(seed + 19) * 185;
+
+  return {
+    ...makeMountainObject(id, x, z, radius, height, seed),
+    size: logicalSize,
+    growth: 4.2 + seeded(seed + 23) * 5.8,
+  };
+};
+
+const createGlobeScenery = () => {
+  const items = [];
+  const itemCount = 68;
+
+  for (let i = 0; i < itemCount; i += 1) {
+    const seed = 8000 + i * 97;
+    const { x, z } = findGlobeLandPosition(seed, GLOBE_RADIUS * 0.1, GLOBE_SCENERY_RADIUS_LIMIT);
     const roll = seeded(seed + 31);
 
-    if (roll < 0.22) {
-      const radius = 34 + seeded(seed + 3) * 62;
-      const height = 70 + seeded(seed + 5) * 150;
-      items.push(makeMountainObject(`globe:mountain:${i}`, x, z, radius, height, seed));
-    } else if (roll < 0.48) {
-      items.push(makeBuildingObject(`globe:building:${i}`, x, z, seed, 0.95 + seeded(seed + 7) * 0.25));
-    } else if (roll < 0.66) {
-      items.push(makeTowerObject(`globe:tower:${i}`, x, z, seed, 0.95 + seeded(seed + 11) * 0.25));
-    } else if (roll < 0.82) {
+    if (roll < 0.16) {
+      items.push(makeGlobeMountainObject(`globe:mountain:${i}`, x, z, seed));
+    } else if (roll < 0.42) {
+      items.push(makeBuildingObject(`globe:building:${i}`, x, z, seed, 0.72 + seeded(seed + 7) * 0.22));
+    } else if (roll < 0.58) {
+      items.push(makeTowerObject(`globe:tower:${i}`, x, z, seed, 0.72 + seeded(seed + 11) * 0.2));
+    } else if (roll < 0.74) {
       items.push(makeHouseObject(`globe:house:${i}`, x, z, seed));
     } else {
-      items.push(makeTreeObject(`globe:tree:${i}`, x, z, 1.2 + seeded(seed + 13) * 1.9, seed));
+      items.push(makeTreeObject(`globe:tree:${i}`, x, z, 0.85 + seeded(seed + 13) * 1.35, seed));
     }
   }
 
@@ -2530,6 +2608,20 @@ function FloatingEntity({ entity, registerEntityRef, playerSize, worldPhase }) {
   const groupRef = useRef(null);
   const entityRef = useRef(entity);
   entityRef.current = entity;
+  const placement = useMemo(() => {
+    if (worldPhase >= 4) {
+      const normal = getGlobeSurfaceNormal(entity.position.x, entity.position.z);
+      return {
+        position: new THREE.Vector3(entity.position.x, getGlobeSurfaceHeight(entity.position.x, entity.position.z), entity.position.z).addScaledVector(normal, 0),
+        quaternion: getGlobeSurfaceQuaternion(entity.position.x, entity.position.z, entity.angle).clone(),
+      };
+    }
+
+    return {
+      position: [entity.position.x, terrainHeight(entity.position.x, entity.position.z), entity.position.z],
+      rotation: [0, entity.angle, 0],
+    };
+  }, [entity.angle, entity.position.x, entity.position.z, worldPhase]);
 
   useEffect(() => {
     registerEntityRef(entity.id, groupRef);
@@ -2537,7 +2629,7 @@ function FloatingEntity({ entity, registerEntityRef, playerSize, worldPhase }) {
   }, [entity.id, registerEntityRef]);
 
   return (
-    <group ref={groupRef} position={[entity.position.x, getGroundHeight(entity.position.x, entity.position.z, worldPhase), entity.position.z]} rotation={[0, entity.angle, 0]}>
+    <group ref={groupRef} position={placement.position} rotation={placement.rotation} quaternion={placement.quaternion}>
       {entity.kind === 'monkey' ? <MonkeyModel size={getRelativeVisualSize(entity.size, playerSize)} variant="wild" /> : <TinyEntityModel entity={entityRef.current} playerSize={playerSize} />}
     </group>
   );
@@ -2596,17 +2688,16 @@ function RemotePlayer({ remotePlayer, playerRef, worldPhase }) {
 
 function Player({ playerRef, worldPhase }) {
   const groupRef = useRef(null);
+  const surfaceScratch = useMemo(() => ({}), []);
 
   useFrame((state) => {
     const player = playerRef.current;
     if (!groupRef.current) return;
 
     const visualSize = getVisualSize(player.size);
-    const ground = getGroundHeight(player.position.x, player.position.z, worldPhase);
     const bob = Math.sin(state.clock.elapsedTime * 6) * 0.03 * visualSize * (player.walkAmount ?? 0);
-    groupRef.current.position.set(player.position.x, ground + bob, player.position.z);
+    setObjectOnSurface(groupRef.current, player.position.x, player.position.z, worldPhase, player.heading + Math.PI, bob, surfaceScratch);
     groupRef.current.scale.setScalar(visualSize);
-    groupRef.current.rotation.y = player.heading + Math.PI;
   });
 
   return (
@@ -2617,22 +2708,40 @@ function Player({ playerRef, worldPhase }) {
 }
 
 function EatBurst({ burst, worldPhase }) {
-  const ref = useRef(null);
+  const groupRef = useRef(null);
+  const materialRef = useRef(null);
+  const surfaceScratch = useMemo(() => ({}), []);
   const visualSize = getVisualSize(burst.size);
+  const placement = useMemo(() => {
+    if (worldPhase >= 4) {
+      const normal = getGlobeSurfaceNormal(burst.x, burst.z);
+      return {
+        position: new THREE.Vector3(burst.x, getGlobeSurfaceHeight(burst.x, burst.z), burst.z).addScaledVector(normal, burst.y),
+        quaternion: getGlobeSurfaceQuaternion(burst.x, burst.z, 0).clone(),
+      };
+    }
+
+    return {
+      position: [burst.x, terrainHeight(burst.x, burst.z) + burst.y, burst.z],
+    };
+  }, [burst.x, burst.y, burst.z, worldPhase]);
 
   useFrame((state) => {
-    if (!ref.current) return;
+    if (!groupRef.current) return;
     const age = state.clock.elapsedTime - burst.createdAt;
     const alpha = clamp(1 - age / 0.7, 0, 1);
-    ref.current.scale.setScalar(1 + age * 3);
-    ref.current.material.opacity = alpha;
+    groupRef.current.scale.setScalar(1 + age * 3);
+    setObjectOnSurface(groupRef.current, burst.x, burst.z, worldPhase, 0, burst.y, surfaceScratch);
+    if (materialRef.current) materialRef.current.opacity = alpha;
   });
 
   return (
-    <mesh ref={ref} position={[burst.x, getGroundHeight(burst.x, burst.z, worldPhase) + burst.y, burst.z]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.5 * visualSize, 0.72 * visualSize, 32]} />
-      <meshBasicMaterial color={burst.kind === 'banana' ? '#ffe373' : '#f09a58'} transparent opacity={0.75} depthWrite={false} />
-    </mesh>
+    <group ref={groupRef} position={placement.position} quaternion={placement.quaternion}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.5 * visualSize, 0.72 * visualSize, 32]} />
+        <meshBasicMaterial ref={materialRef} color={burst.kind === 'banana' ? '#ffe373' : '#f09a58'} transparent opacity={0.75} depthWrite={false} />
+      </mesh>
+    </group>
   );
 }
 
@@ -2657,12 +2766,7 @@ function GlobeWorld({ won }) {
       const x = position.getX(i) / radius;
       const y = position.getY(i) / radius;
       const z = position.getZ(i) / radius;
-      const lat = Math.asin(y);
-      const lon = Math.atan2(z, x);
-      const landScore =
-        Math.sin(lon * 3.1 + lat * 2.3) +
-        Math.cos(lon * 5.4 - lat * 1.7) * 0.72 +
-        Math.sin((lon + lat) * 8.2) * 0.38;
+      const landScore = getGlobeLandScoreFromNormal(x, y, z);
 
       if (landScore > 0.18) {
         color.set(y > 0.62 ? '#d8e4cf' : y > 0.18 ? '#80a960' : '#6da758');
@@ -2690,17 +2794,33 @@ function GlobeWorld({ won }) {
   );
 }
 
+const getGlobeSceneryScale = (object) => GLOBE_SCENERY_SCALE_BY_KIND[object.kind] ?? 1;
+
 function GlobeScenery({ scenery }) {
-  const globeObjects = useMemo(() => scenery.filter((item) => ['tree', 'house', 'building', 'tower', 'mountain'].includes(item.kind)), [scenery]);
+  const globeObjects = useMemo(
+    () =>
+      scenery
+        .filter((item) => ['tree', 'house', 'building', 'tower', 'mountain'].includes(item.kind))
+        .map((object) => {
+          const normal = getGlobeSurfaceNormal(object.x, object.z);
+          const position = new THREE.Vector3(object.x, getGlobeSurfaceHeight(object.x, object.z), object.z).addScaledVector(normal, 0.35);
+          const angle = object.angle ?? seeded(object.x + object.z) * Math.PI * 2;
+
+          return {
+            object,
+            position,
+            quaternion: getGlobeSurfaceQuaternion(object.x, object.z, angle).clone(),
+            scale: getGlobeSceneryScale(object),
+          };
+        }),
+    [scenery],
+  );
 
   return (
     <group>
-      {globeObjects.map((object) => {
-        const y = getGlobeSurfaceHeight(object.x, object.z);
-        const angle = object.angle ?? seeded(object.x + object.z) * Math.PI * 2;
-
+      {globeObjects.map(({ object, position, quaternion, scale }) => {
         return (
-          <group key={object.id} position={[object.x, y, object.z]} rotation={[0, angle, 0]} scale={9.5}>
+          <group key={object.id} position={position} quaternion={quaternion} scale={scale}>
             {object.kind === 'tree' && (
               <group scale={object.scale}>
                 <mesh position={[0, 2.4, 0]} castShadow receiveShadow>
@@ -2721,7 +2841,7 @@ function GlobeScenery({ scenery }) {
             {object.kind === 'building' && <BuildingModel object={object} />}
             {object.kind === 'tower' && <TowerModel object={object} />}
             {object.kind === 'mountain' && (
-              <group scale={0.9}>
+              <group>
                 <mesh position={[0, object.height / 2, 0]} castShadow receiveShadow>
                   <coneGeometry args={[object.radius, object.height, 7]} />
                   <meshStandardMaterial color="#6f775e" roughness={1} />
@@ -2804,6 +2924,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
   const tempVector = useMemo(() => new THREE.Vector3(), []);
   const targetVector = useMemo(() => new THREE.Vector3(), []);
   const cameraOffset = useMemo(() => new THREE.Vector3(), []);
+  const entitySurfaceScratch = useMemo(() => ({}), []);
 
   const publishStats = useCallback(
     (force = false) => {
@@ -3230,11 +3351,18 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
 
         const objectRef = entityObjectRefs.current.get(entity.id);
         if (objectRef?.current) {
-          const y = getGroundHeight(entity.position.x, entity.position.z, worldPhaseRef.current);
           const visualEntitySize = getRelativeVisualSize(entity.size, player.size);
           const float = FLOATING_ENTITY_KINDS.has(entity.kind) ? Math.sin(entity.pulse) * visualEntitySize * 0.18 + visualEntitySize * 0.9 : 0;
-          objectRef.current.position.set(entity.position.x, y + float, entity.position.z);
-          objectRef.current.rotation.y += (FLOATING_ENTITY_KINDS.has(entity.kind) ? 1.35 : 0.12) * dt;
+          const spinSpeed = FLOATING_ENTITY_KINDS.has(entity.kind) ? 1.35 : 0.12;
+          entity.renderAngle = (Number.isFinite(entity.renderAngle) ? entity.renderAngle : entity.angle) + spinSpeed * dt;
+          const renderYaw = MOVING_ENTITY_KINDS.has(entity.kind) ? entity.angle : entity.renderAngle;
+
+          if (worldPhaseRef.current >= 4) {
+            setObjectOnSurface(objectRef.current, entity.position.x, entity.position.z, worldPhaseRef.current, renderYaw, float, entitySurfaceScratch);
+          } else {
+            objectRef.current.position.set(entity.position.x, terrainHeight(entity.position.x, entity.position.z) + float, entity.position.z);
+            objectRef.current.rotation.y = renderYaw;
+          }
         }
       }
 
@@ -3640,7 +3768,13 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, onStats, onWin,
     const horizontalDistance = Math.cos(pitch) * orbitDistance;
     const verticalDistance = Math.sin(pitch) * orbitDistance;
     const playerGround = getGroundHeight(player.position.x, player.position.z, worldPhaseRef.current);
-    targetVector.set(player.position.x, playerGround + visualSize * 1.25, player.position.z);
+    if (worldPhaseRef.current >= 4) {
+      const normal = entitySurfaceScratch.cameraNormal || (entitySurfaceScratch.cameraNormal = new THREE.Vector3());
+      getGlobeSurfaceNormal(player.position.x, player.position.z, normal);
+      targetVector.set(player.position.x, playerGround, player.position.z).addScaledVector(normal, visualSize * 1.25);
+    } else {
+      targetVector.set(player.position.x, playerGround + visualSize * 1.25, player.position.z);
+    }
     cameraOffset.set(Math.sin(yaw) * horizontalDistance, verticalDistance, Math.cos(yaw) * horizontalDistance);
     camera.position.lerp(targetVector.clone().add(cameraOffset), 1 - Math.exp(-dt * 2.8));
     camera.lookAt(targetVector);
