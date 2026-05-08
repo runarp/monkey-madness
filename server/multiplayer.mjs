@@ -5,6 +5,7 @@ const MIN_LOGICAL_SIZE = 0.04;
 const MAX_VISUAL_SIZE = 820;
 const MAX_WORLD_PHASE = 4;
 const PLAYER_EAT_PLAYER_RATIO = 1.08;
+const MAX_PLAYER_NAME_LENGTH = 14;
 const REQUEST_SIZE_LIMIT = 16 * 1024;
 const PLAYER_TTL_MS = 12_000;
 const EAT_GRACE_MS = 2_000;
@@ -34,7 +35,7 @@ const safeString = (value, fallback = '') => String(value ?? fallback);
 const sanitizeId = (value) => safeString(value).replace(/[^A-Za-z0-9:_-]/g, '').slice(0, 96);
 
 const sanitizeName = (value) => {
-  const name = safeString(value, 'Player').trim().replace(/\s+/g, ' ').slice(0, 18);
+  const name = safeString(value, 'Player').trim().replace(/\s+/g, ' ').slice(0, MAX_PLAYER_NAME_LENGTH);
   return name || 'Player';
 };
 

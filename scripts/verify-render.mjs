@@ -38,6 +38,12 @@ for (const viewport of scenarios) {
   const url = viewport.startSize ? `${baseUrl}?startSize=${viewport.startSize}` : baseUrl;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.locator('canvas').waitFor({ state: 'visible' });
+  const characterNameInput = page.locator('#character-name');
+  if ((await characterNameInput.count()) > 0) {
+    await characterNameInput.fill(`Codex ${viewport.name}`.slice(0, 14));
+    await page.locator('.start-panel button[type="submit"]').click();
+    await page.locator('.start-panel').waitFor({ state: 'hidden' });
+  }
   await page.waitForTimeout(120);
   const debugSpawn = await page.evaluate(() => window.__MONKEY_GAME_DEBUG__ ?? null);
   const touchControls = viewport.expectTouchControls
@@ -249,14 +255,11 @@ for (const viewport of scenarios) {
     if (!(await page.locator('.end-panel').isVisible())) {
       failures.push(`${viewport.name}: expected finale panel to be visible`);
     }
-    const nameInput = page.locator('#player-name');
-    if (!(await nameInput.isVisible().catch(() => false))) {
-      failures.push(`${viewport.name}: expected focused score name input`);
-    } else {
-      const nameInputFocused = await nameInput.evaluate((node) => document.activeElement === node);
-      if (!nameInputFocused) {
-        failures.push(`${viewport.name}: score name input was not focused for keyboard entry`);
-      }
+    const scoreName = page.locator('.score-player-name');
+    const playAgain = page.locator('.win-panel .restart-button');
+    const hasAutoScoreFlow = (await scoreName.isVisible().catch(() => false)) || (await playAgain.isVisible().catch(() => false));
+    if (!hasAutoScoreFlow) {
+      failures.push(`${viewport.name}: expected auto score save flow to use the character name`);
     }
   }
   if (hudValues.some((value) => value.length > 12)) {
