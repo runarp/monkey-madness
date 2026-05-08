@@ -71,7 +71,7 @@ input {
 
 .stat-panel {
   display: grid;
-  grid-template-columns: repeat(11, minmax(66px, max-content));
+  grid-template-columns: repeat(13, minmax(66px, max-content));
   gap: 2px;
   padding: 8px;
 }
@@ -84,9 +84,13 @@ input {
 .stat-panel span {
   display: block;
   margin-bottom: 1px;
+  max-width: 7.5rem;
+  overflow: hidden;
   color: rgba(232, 242, 219, 0.74);
   font-size: 0.72rem;
   line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stat-panel strong {

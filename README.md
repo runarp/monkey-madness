@@ -10,6 +10,7 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 - Name your T-Rex before each browser session starts.
 - Start with tiny snacks like ants, worms, flowers, brush, and signposts.
 - Grow into eating trees, cars, houses, buildings, towers, mountains, and eventually planet-scale objects.
+- After the globe scale, jump into orbit, eat the Moon, cross a compressed solar system, consume planets, asteroid belts, the Sun, and nearby star systems until the galaxy comes into view.
 - Avoid larger rival T-Rex enemies. They can eat you if they are big enough.
 - Multiplayer is on by default for everyone connected to the same running host.
   Players in the same world phase can see, identify, and eat each other.

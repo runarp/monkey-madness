@@ -7,7 +7,6 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 
 const COUNTRY_SIZE = 1800;
 const HALF_COUNTRY = COUNTRY_SIZE / 2;
-const MAX_WORLD_PHASE = 4;
 const MAX_LOGICAL_SIZE = 1e24;
 const MAX_VISUAL_SIZE = 820;
 const MIN_LOGICAL_SIZE = 0.04;
@@ -16,7 +15,6 @@ const BASE_ENTITY_COUNT = 92;
 const DEFAULT_SPAWN_MULTIPLIER = 2;
 const MAX_SPAWN_MULTIPLIER = 20;
 const MAX_RIVAL_REX_COUNT = 6;
-const FINAL_GLOBE_SIZE = 900;
 const MAX_SCENERY_EATS_PER_FRAME = 1;
 const ENTITY_GROWTH_CAP_RATIO = 0.045;
 const SCENERY_GROWTH_CAP_RATIO = 0.045;
@@ -30,6 +28,12 @@ const MAX_LEADERBOARD_ENTRIES = 8;
 const MAX_PLAYER_NAME_LENGTH = 14;
 const MULTIPLAYER_STATE_INTERVAL_MS = 90;
 const MULTIPLAYER_SNAPSHOT_POLL_MS = 2500;
+const GLOBE_PHASE = 4;
+const ORBIT_PHASE = 5;
+const SOLAR_SYSTEM_PHASE = 6;
+const SUNWARD_PHASE = 7;
+const STARS_PHASE = 8;
+const GALAXY_PHASE = 9;
 const GLOBE_RADIUS = 8200;
 const GLOBE_WORLD_LIMIT = GLOBE_RADIUS * 0.92;
 const GLOBE_CENTER_Y = -GLOBE_RADIUS + 8;
@@ -42,6 +46,11 @@ const GLOBE_SCENERY_SCALE_BY_KIND = {
   tower: 1.95,
   mountain: 1.08,
 };
+const ORBIT_ENTRY_SIZE = 900;
+const GALAXY_VISIBLE_SIZE = 120000;
+const SPACE_WORLD_LIMIT = 460000;
+const EARTH_ORBIT_DISTANCE = 9000;
+const SPACE_EARTH_RADIUS = 150;
 const CAMERA_ZOOM_MIN = 0.42;
 const CAMERA_ZOOM_MAX = 2.35;
 const CAMERA_PITCH_MIN = -0.34;
@@ -61,7 +70,13 @@ const WORLD_PHASES = [
   { label: 'City', minSize: 24 },
   { label: 'Mountains', minSize: 110 },
   { label: 'Globe', minSize: 320 },
+  { label: 'Orbit', minSize: ORBIT_ENTRY_SIZE },
+  { label: 'Solar Sys', minSize: 1800 },
+  { label: 'Sunward', minSize: 16000 },
+  { label: 'Stars', minSize: 42000 },
+  { label: 'Galaxy', minSize: 110000 },
 ];
+const MAX_WORLD_PHASE = WORLD_PHASES.length - 1;
 const TILE_COORDS_BY_PHASE = [
   [[0, 0]],
   [
@@ -121,6 +136,13 @@ const seeded = (value) => {
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const safeNumber = (value, fallback = START_SIZE) => (Number.isFinite(value) ? value : fallback);
+
+const getDampedAlpha = (delta, speed) => 1 - Math.exp(-Math.max(0, safeNumber(delta, 0)) * speed);
+
+const lerpAngle = (from, to, alpha) => {
+  const turn = THREE.MathUtils.euclideanModulo(to - from + Math.PI, Math.PI * 2) - Math.PI;
+  return from + turn * alpha;
+};
 
 let uniqueIdCounter = 0;
 const createUniqueId = () => {
@@ -191,7 +213,7 @@ const getTileSeed = (tx, tz) => tx * 1009 + tz * 917 + 13;
 
 const getTileRadiusForPhase = (phase) => {
   const safePhase = clamp(phase, 0, MAX_WORLD_PHASE);
-  if (safePhase >= 4) return Math.ceil(GLOBE_WORLD_LIMIT / COUNTRY_SIZE);
+  if (safePhase >= GLOBE_PHASE) return Math.ceil(GLOBE_WORLD_LIMIT / COUNTRY_SIZE);
 
   const coords = TILE_COORDS_BY_PHASE[safePhase] ?? TILE_COORDS_BY_PHASE[TILE_COORDS_BY_PHASE.length - 1];
   return Math.max(0, ...coords.map(([tx, tz]) => Math.max(Math.abs(tx), Math.abs(tz))));
@@ -212,7 +234,8 @@ const getTilesForPhase = (phase) => {
 };
 
 const getWorldLimit = (phase) => {
-  if (phase >= 4) return GLOBE_WORLD_LIMIT;
+  if (phase >= ORBIT_PHASE) return SPACE_WORLD_LIMIT;
+  if (phase === GLOBE_PHASE) return GLOBE_WORLD_LIMIT;
 
   const radius = getTileRadiusForPhase(phase);
   return HALF_COUNTRY * 1.42 + radius * COUNTRY_SIZE;
@@ -220,8 +243,13 @@ const getWorldLimit = (phase) => {
 
 const getMoveSpeed = (size, phase = 0) => {
   const safeSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(size));
+  if (phase >= ORBIT_PHASE) {
+    const scale = Math.max(1, safeSize / ORBIT_ENTRY_SIZE);
+    return clamp(680 + Math.pow(scale, 1.12) * 430, 900, 26000);
+  }
+
   const visualSize = getVisualSize(safeSize);
-  const phaseBoost = 1 + clamp(phase, 0, MAX_WORLD_PHASE) * 0.18;
+  const phaseBoost = 1 + clamp(phase, 0, GLOBE_PHASE) * 0.18;
   const speed = 13.5 + visualSize * 1.08 * phaseBoost + Math.log1p(safeSize) * 3.9;
   return Math.min(1400, speed);
 };
@@ -283,6 +311,14 @@ const getPlayerEatCooldown = (kind, playerSize) => {
     mountain: 0.82,
     rival: 0.9,
     player: 0.9,
+    moon: 0.42,
+    asteroid: 0.28,
+    planet: 0.62,
+    earth: 0.62,
+    gasGiant: 0.82,
+    iceGiant: 0.82,
+    sun: 1.15,
+    star: 1.25,
   }[kind] ?? 0.16;
 
   return Math.max(baseCooldown, getSceneryEatCooldown(kind, playerSize) * 0.75);
@@ -307,6 +343,14 @@ const getEatScore = (kind, targetSize, eaterSize, growth = 0) => {
     mountain: 85,
     rival: 120,
     player: 150,
+    moon: 160,
+    asteroid: 140,
+    planet: 220,
+    earth: 220,
+    gasGiant: 360,
+    iceGiant: 360,
+    sun: 900,
+    star: 1200,
   }[kind] ?? 10;
   const sizeScore = Math.sqrt(Math.max(MIN_LOGICAL_SIZE, safeNumber(targetSize))) * 18;
   const growthScore = Math.max(0, safeNumber(growth, 0)) * 95;
@@ -337,11 +381,11 @@ const getEntityGrowth = (entity, eaterSize) => {
   return Math.min(rawGrowth, Math.max(0.014, safeEaterSize * getGrowthCapRatio(safeEaterSize)));
 };
 
-const getRivalMoveSpeed = (size, phase = 0) => getMoveSpeed(size, phase) * (0.58 + clamp(phase, 0, MAX_WORLD_PHASE) * 0.035);
+const getRivalMoveSpeed = (size, phase = 0) => getMoveSpeed(size, phase) * (0.58 + clamp(phase, 0, GLOBE_PHASE) * 0.035);
 
 const getRivalThreat = (rivalSize, playerSize) => Math.max(0, safeNumber(rivalSize) / Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize)) - 1);
 
-const getRivalCountForPhase = (phase) => (phase >= 4 ? 0 : Math.min(3, MAX_RIVAL_REX_COUNT));
+const getRivalCountForPhase = (phase) => (phase >= GLOBE_PHASE ? 0 : Math.min(3, MAX_RIVAL_REX_COUNT));
 
 const formatMagnitude = (value, digits = 2) => {
   const safeValue = Math.max(0, safeNumber(value, 0));
@@ -488,6 +532,7 @@ const getPlayerSummary = (player) => ({
   critters: player.monkeys,
   objects: player.objects,
   eaten: player.eaten,
+  systems: safeNumber(player.systems, 0),
   world: getPhaseLabel(getWorldPhase(player.size)),
 });
 
@@ -512,7 +557,10 @@ const getGlobeSurfaceHeight = (x, z) => {
   return GLOBE_CENTER_Y + getGlobeSurfaceYFromCenter(x, z);
 };
 
-const getGroundHeight = (x, z, phase = 0) => (phase >= 4 ? getGlobeSurfaceHeight(x, z) : terrainHeight(x, z));
+const getGroundHeight = (x, z, phase = 0) => {
+  if (phase >= ORBIT_PHASE) return 0;
+  return phase === GLOBE_PHASE ? getGlobeSurfaceHeight(x, z) : terrainHeight(x, z);
+};
 
 const getGlobeSurfaceNormal = (x, z, target = new THREE.Vector3()) =>
   target.set(x, getGlobeSurfaceYFromCenter(x, z), z).normalize();
@@ -545,7 +593,7 @@ const getGlobeSurfaceQuaternion = (x, z, yaw = 0, scratch = {}) => {
 };
 
 const setObjectOnSurface = (object, x, z, phase = 0, yaw = 0, lift = 0, scratch = {}) => {
-  if (phase >= 4) {
+  if (phase === GLOBE_PHASE) {
     const normal = scratch.normal || (scratch.normal = new THREE.Vector3());
 
     getGlobeSurfaceNormal(x, z, normal);
@@ -559,12 +607,20 @@ const setObjectOnSurface = (object, x, z, phase = 0, yaw = 0, lift = 0, scratch 
 };
 
 const constrainToWorld = (x, z, phase = 0) => {
-  if (phase < 4) {
+  if (phase < GLOBE_PHASE) {
     const worldLimit = getWorldLimit(phase);
     return {
       x: clamp(x, -worldLimit, worldLimit),
       z: clamp(z, -worldLimit, worldLimit),
     };
+  }
+
+  if (phase >= ORBIT_PHASE) {
+    const distance = Math.hypot(x, z);
+    if (distance <= SPACE_WORLD_LIMIT) return { x, z };
+
+    const scale = SPACE_WORLD_LIMIT / Math.max(distance, 0.001);
+    return { x: x * scale, z: z * scale };
   }
 
   const distance = Math.hypot(x, z);
@@ -618,7 +674,7 @@ const getTileAtPosition = (x, z, phase) =>
   getTilesForPhase(phase).find((tile) => Math.abs(x - tile.offsetX) <= HALF_COUNTRY && Math.abs(z - tile.offsetZ) <= HALF_COUNTRY);
 
 const isLandInPhase = (x, z, phase) => {
-  if (phase >= 4) return true;
+  if (phase >= GLOBE_PHASE) return true;
   const tile = getTileAtPosition(x, z, phase);
   return tile ? isLandAt(x, z, tile.offsetX, tile.offsetZ, tile.tileSeed) : false;
 };
@@ -922,6 +978,8 @@ const placedEntity = (kind, x, z, size, idPrefix = 'starter-') => ({
 });
 
 const initialEntities = (phase = 0, playerSize = WORLD_PHASES[phase]?.minSize ?? START_SIZE) => {
+  if (phase >= ORBIT_PHASE) return [];
+
   const origin = new THREE.Vector3(0, 0, 0);
   const entities =
     phase === 0
@@ -1251,7 +1309,338 @@ const createSceneryForTile = (tile) => {
   return items;
 };
 
-const createSceneryForPhase = (phase) => (phase >= 4 ? createGlobeScenery() : getTilesForPhase(phase).flatMap(createSceneryForTile));
+const createSceneryForPhase = (phase) => {
+  if (phase >= ORBIT_PHASE) return [];
+  return phase === GLOBE_PHASE ? createGlobeScenery() : getTilesForPhase(phase).flatMap(createSceneryForTile);
+};
+
+const getOrbitDistanceFromAu = (au, orbitScale = 1) => (au <= 0 ? 0 : EARTH_ORBIT_DISTANCE * orbitScale * Math.pow(au, 0.55));
+
+const getSpaceBodyRenderRadius = (radiusEarth, kind = 'planet') => {
+  if (kind === 'sun' || kind === 'star') return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.43), 760, 1850);
+  if (kind === 'gasGiant') return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.72), 420, 1050);
+  if (kind === 'iceGiant') return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.74), 300, 760);
+  if (kind === 'moon') return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.84), 42, 86);
+  if (kind === 'asteroid') return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.72), 22, 72);
+  return clamp(SPACE_EARTH_RADIUS * Math.pow(radiusEarth, 0.78), 58, 230);
+};
+
+const getSpaceEntryPosition = () => new THREE.Vector3(EARTH_ORBIT_DISTANCE + 160, 0, -520);
+
+const makeSpaceBody = ({
+  id,
+  name,
+  kind = 'planet',
+  systemId = 'sol',
+  systemName = 'Solar System',
+  x,
+  z,
+  au = 0,
+  orbitDistance = 0,
+  orbitScale = 1,
+  angle = 0,
+  size,
+  growth,
+  radiusEarth = 1,
+  color = '#b8c5d6',
+  secondaryColor = '#e5edf6',
+  emissive = '#000000',
+  visiblePhase = ORBIT_PHASE,
+  decorative = false,
+  ring = false,
+  banded = false,
+  atmosphere = null,
+  seed = 1,
+}) => {
+  const distance = orbitDistance || getOrbitDistanceFromAu(au, orbitScale);
+  const bodyX = Number.isFinite(x) ? x : Math.cos(angle) * distance;
+  const bodyZ = Number.isFinite(z) ? z : Math.sin(angle) * distance;
+
+  return {
+    id,
+    name,
+    kind,
+    systemId,
+    systemName,
+    x: bodyX,
+    z: bodyZ,
+    au,
+    orbitDistance: distance,
+    angle,
+    size,
+    growth,
+    radiusEarth,
+    renderRadius: getSpaceBodyRenderRadius(radiusEarth, kind),
+    color,
+    secondaryColor,
+    emissive,
+    visiblePhase,
+    decorative,
+    ring,
+    banded,
+    atmosphere,
+    seed,
+  };
+};
+
+const SOLAR_PLANET_DEFINITIONS = [
+  { id: 'mercury', name: 'Mercury', kind: 'planet', au: 0.39, angle: 2.6, size: 960, growth: 330, radiusEarth: 0.383, color: '#8f8a82', secondaryColor: '#c7bca8' },
+  { id: 'venus', name: 'Venus', kind: 'planet', au: 0.72, angle: 4.18, size: 1500, growth: 620, radiusEarth: 0.949, color: '#d8b36a', secondaryColor: '#fff0bf', atmosphere: '#f4d681' },
+  { id: 'mars', name: 'Mars', kind: 'planet', au: 1.52, angle: 1.42, size: 1240, growth: 500, radiusEarth: 0.532, color: '#b95738', secondaryColor: '#e49a6c', atmosphere: '#df8357' },
+  { id: 'jupiter', name: 'Jupiter', kind: 'gasGiant', au: 5.2, angle: 5.48, size: 3600, growth: 2300, radiusEarth: 11.21, color: '#d5b184', secondaryColor: '#8d664a', banded: true },
+  { id: 'saturn', name: 'Saturn', kind: 'gasGiant', au: 9.58, angle: 3.58, size: 6200, growth: 3300, radiusEarth: 9.45, color: '#d8c694', secondaryColor: '#9d815c', banded: true, ring: true },
+  { id: 'uranus', name: 'Uranus', kind: 'iceGiant', au: 19.2, angle: 0.68, size: 9200, growth: 4500, radiusEarth: 4.01, color: '#93d8db', secondaryColor: '#c2f5f4', atmosphere: '#a5edf0' },
+  { id: 'neptune', name: 'Neptune', kind: 'iceGiant', au: 30.05, angle: 2.08, size: 13200, growth: 6000, radiusEarth: 3.88, color: '#315eb8', secondaryColor: '#87b6ff', atmosphere: '#5e8fff' },
+];
+
+const NEIGHBOR_SYSTEMS = [
+  {
+    id: 'alpha',
+    name: 'Alpha Centauri',
+    x: 118000,
+    z: -28000,
+    orbitScale: 0.52,
+    angleOffset: 0.35,
+    starSize: 42000,
+    starGrowth: 30000,
+    starRadiusEarth: 116,
+    starColor: '#ffd89d',
+    visiblePhase: STARS_PHASE,
+  },
+  {
+    id: 'barnard',
+    name: "Barnard's Star",
+    x: 238000,
+    z: 68000,
+    orbitScale: 0.58,
+    angleOffset: 1.15,
+    starSize: 68000,
+    starGrowth: 36000,
+    starRadiusEarth: 84,
+    starColor: '#ffb18c',
+    visiblePhase: STARS_PHASE,
+  },
+  {
+    id: 'sirius',
+    name: 'Sirius',
+    x: 356000,
+    z: -106000,
+    orbitScale: 0.66,
+    angleOffset: 2.05,
+    starSize: 96000,
+    starGrowth: 44000,
+    starRadiusEarth: 186,
+    starColor: '#cfe7ff',
+    visiblePhase: STARS_PHASE,
+  },
+];
+
+const createAsteroidBeltBodies = () => {
+  const asteroids = [];
+  for (let index = 0; index < 16; index += 1) {
+    const seed = 23000 + index * 113;
+    const au = 2.18 + seeded(seed) * 1.05;
+    const angle = seeded(seed + 7) * Math.PI * 2;
+    const radiusEarth = 0.08 + seeded(seed + 13) * 0.18;
+    const size = 1320 + seeded(seed + 23) * 1750;
+    asteroids.push(
+      makeSpaceBody({
+        id: `sol:asteroid:${index}`,
+        name: 'Asteroid',
+        kind: 'asteroid',
+        au,
+        angle,
+        size,
+        growth: 240 + seeded(seed + 31) * 560,
+        radiusEarth,
+        color: seeded(seed + 41) > 0.5 ? '#8c735f' : '#6e665d',
+        secondaryColor: '#c0aa90',
+        seed,
+      }),
+    );
+  }
+  return asteroids;
+};
+
+const createSolarSystemBodies = () => {
+  const earthX = getOrbitDistanceFromAu(1);
+  const earthZ = 0;
+  const moonDistance = 820;
+  const moonAngle = 0.15;
+
+  return [
+    makeSpaceBody({
+      id: 'sol:sun',
+      name: 'Sun',
+      kind: 'sun',
+      systemId: 'sol',
+      systemName: 'Solar System',
+      x: 0,
+      z: 0,
+      size: 19800,
+      growth: 26000,
+      radiusEarth: 109.1,
+      color: '#ffd45d',
+      secondaryColor: '#fff1a5',
+      emissive: '#ff9f32',
+      seed: 91,
+    }),
+    makeSpaceBody({
+      id: 'sol:earth',
+      name: 'Earth',
+      kind: 'earth',
+      systemId: 'sol',
+      systemName: 'Solar System',
+      x: earthX,
+      z: earthZ,
+      au: 1,
+      orbitDistance: earthX,
+      size: ORBIT_ENTRY_SIZE,
+      growth: 0,
+      radiusEarth: 1,
+      color: '#2b75b8',
+      secondaryColor: '#5cac63',
+      atmosphere: '#93d7ff',
+      decorative: true,
+      seed: 101,
+    }),
+    makeSpaceBody({
+      id: 'sol:moon',
+      name: 'Moon',
+      kind: 'moon',
+      systemId: 'sol',
+      systemName: 'Earth Orbit',
+      x: earthX + Math.cos(moonAngle) * moonDistance,
+      z: earthZ + Math.sin(moonAngle) * moonDistance,
+      orbitDistance: moonDistance,
+      size: 760,
+      growth: 260,
+      radiusEarth: 0.273,
+      color: '#b9b7ad',
+      secondaryColor: '#e1dfd3',
+      seed: 103,
+    }),
+    ...SOLAR_PLANET_DEFINITIONS.map((planet, index) =>
+      makeSpaceBody({
+        ...planet,
+        id: `sol:${planet.id}`,
+        systemId: 'sol',
+        systemName: 'Solar System',
+        seed: 300 + index * 41,
+      }),
+    ),
+    ...createAsteroidBeltBodies(),
+  ];
+};
+
+const createNeighborSystemBodies = (system) => {
+  const planets = [
+    { suffix: 'inner', au: 0.58, size: system.starSize * 0.2, growth: system.starGrowth * 0.08, radiusEarth: 0.72, color: '#b76b55', secondaryColor: '#dfb08a' },
+    { suffix: 'temperate', au: 1.08, size: system.starSize * 0.32, growth: system.starGrowth * 0.11, radiusEarth: 1.08, color: '#3f86a9', secondaryColor: '#67a463', atmosphere: '#9fd8ff' },
+    { suffix: 'giant', au: 2.65, size: system.starSize * 0.48, growth: system.starGrowth * 0.16, radiusEarth: 7.6, color: '#b99567', secondaryColor: '#f1d5a1', banded: true },
+    { suffix: 'outer', au: 4.6, size: system.starSize * 0.64, growth: system.starGrowth * 0.2, radiusEarth: 3.2, color: '#79b6d8', secondaryColor: '#b9efff', atmosphere: '#9ee8ff' },
+  ];
+
+  return [
+    makeSpaceBody({
+      id: `${system.id}:star`,
+      name: system.name,
+      kind: 'star',
+      systemId: system.id,
+      systemName: system.name,
+      x: system.x,
+      z: system.z,
+      size: system.starSize,
+      growth: system.starGrowth,
+      radiusEarth: system.starRadiusEarth,
+      color: system.starColor,
+      secondaryColor: '#fff2cf',
+      emissive: system.starColor,
+      visiblePhase: system.visiblePhase,
+      seed: seeded(system.x + system.z) * 10000,
+    }),
+    ...planets.map((planet, index) =>
+      makeSpaceBody({
+        id: `${system.id}:${planet.suffix}`,
+        name: `${system.name} Planet`,
+        kind: planet.radiusEarth > 5 ? 'gasGiant' : 'planet',
+        systemId: system.id,
+        systemName: system.name,
+        x: system.x + Math.cos(system.angleOffset + index * 1.72) * getOrbitDistanceFromAu(planet.au, system.orbitScale),
+        z: system.z + Math.sin(system.angleOffset + index * 1.72) * getOrbitDistanceFromAu(planet.au, system.orbitScale),
+        au: planet.au,
+        orbitDistance: getOrbitDistanceFromAu(planet.au, system.orbitScale),
+        size: planet.size,
+        growth: planet.growth,
+        radiusEarth: planet.radiusEarth,
+        color: planet.color,
+        secondaryColor: planet.secondaryColor,
+        atmosphere: planet.atmosphere,
+        banded: planet.banded,
+        visiblePhase: system.visiblePhase,
+        seed: system.x * 0.01 + index * 367,
+      }),
+    ),
+  ];
+};
+
+const createSpaceBodiesForPhase = (phase) => {
+  if (phase < ORBIT_PHASE) return [];
+  const bodies = [...createSolarSystemBodies(), ...NEIGHBOR_SYSTEMS.flatMap(createNeighborSystemBodies)];
+  return bodies.filter((body) => body.visiblePhase <= phase);
+};
+
+const isSpaceBodyEdibleBy = (body, playerSize) => !body.decorative && body.size <= Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize)) * 0.98;
+
+const getSpaceBodyGrowth = (body) => Math.max(0, safeNumber(body.growth, body.size * 0.25));
+
+const getSpaceBurstColor = (kind) =>
+  ({
+    moon: '#d9d7cb',
+    asteroid: '#b99771',
+    planet: '#77c5ff',
+    earth: '#6ee082',
+    gasGiant: '#ffd18b',
+    iceGiant: '#9ee9ff',
+    sun: '#ffcc52',
+    star: '#dcecff',
+  })[kind] ?? '#ffe681';
+
+const getSpaceHudName = (body) => {
+  if (!body) return 'Target';
+  if (body.kind === 'asteroid') return 'Asteroid';
+  if (body.kind === 'star') return body.systemId === 'alpha' ? 'Alpha' : body.systemId === 'barnard' ? 'Barnard' : body.name;
+  if (/planet/i.test(body.name) && body.systemName) return body.systemName.split(' ')[0];
+  return body.name;
+};
+
+const getSpaceHudTarget = (bodies, playerPosition, playerSize) => {
+  if (!Array.isArray(bodies) || bodies.length === 0) return null;
+
+  const playerRadius = Math.max(0.55, getVisualSize(playerSize) * 0.68);
+  let nearestEdible = null;
+  let nearestBlocked = null;
+
+  for (const body of bodies) {
+    if (body.decorative) continue;
+
+    const centerDistance = Math.hypot(body.x - playerPosition.x, body.z - playerPosition.z);
+    const surfaceDistance = Math.max(0, centerDistance - playerRadius - Math.max(18, body.renderRadius * 0.92));
+    const candidate = {
+      body,
+      distance: surfaceDistance,
+      edible: isSpaceBodyEdibleBy(body, playerSize),
+    };
+
+    if (candidate.edible) {
+      if (!nearestEdible || candidate.distance < nearestEdible.distance) nearestEdible = candidate;
+    } else if (!nearestBlocked || candidate.distance < nearestBlocked.distance) {
+      nearestBlocked = candidate;
+    }
+  }
+
+  return nearestEdible ?? nearestBlocked;
+};
 
 function useKeyboardInput(inputRef) {
   useEffect(() => {
@@ -1353,6 +1742,18 @@ function HUD({ stats, isPaused, onPauseToggle, onReset }) {
           <span>World</span>
           <strong>{stats.world}</strong>
         </div>
+        {stats.spaceMode && (
+          <div>
+            <span>Speed</span>
+            <strong>{stats.speed}</strong>
+          </div>
+        )}
+        {stats.spaceMode && (
+          <div>
+            <span>{stats.targetName}</span>
+            <strong>{stats.targetDistance}</strong>
+          </div>
+        )}
       </div>
 
       <div className="hud-actions">
@@ -1444,7 +1845,20 @@ function TouchJoystick({ inputRef, mode = 'move', ariaLabel = 'Move' }) {
   );
 }
 
-function SceneLighting() {
+function SceneLighting({ space = false }) {
+  if (space) {
+    return (
+      <>
+        <ambientLight intensity={0.34} />
+        <pointLight position={[0, 0, 0]} intensity={6.2} distance={180000} decay={1.05} color="#fff0c8" />
+        <pointLight position={[118000, 0, -28000]} intensity={2.1} distance={88000} decay={1.1} color="#ffd89d" />
+        <pointLight position={[238000, 0, 68000]} intensity={1.8} distance={98000} decay={1.1} color="#ffb18c" />
+        <pointLight position={[356000, 0, -106000]} intensity={1.8} distance={115000} decay={1.1} color="#cfe7ff" />
+        <hemisphereLight args={['#758cb8', '#070912', 0.62]} />
+      </>
+    );
+  }
+
   return (
     <>
       <ambientLight intensity={0.86} />
@@ -2241,7 +2655,7 @@ function MonkeyModel({ size = 1, variant = 'player', motionRef = null }) {
   );
 }
 
-function ProceduralTRexModel({ size = 1, motionRef = null, variant = 'player', tone = 0 }) {
+function ProceduralTRexModel({ size = 1, motionRef = null, variant = 'player', tone = 0, space = false }) {
   const enemy = variant === 'enemy';
   const palette = useMemo(() => {
     const enemyPalettes = [
@@ -2250,8 +2664,9 @@ function ProceduralTRexModel({ size = 1, motionRef = null, variant = 'player', t
       { hide: '#6c352f', dark: '#351c19', mid: '#88483a', light: '#b46f54', belly: '#d19a74', ridge: '#dc8150', eye: '#ffe080' },
     ];
     if (enemy) return enemyPalettes[Math.floor(clamp(tone, 0, 0.999) * enemyPalettes.length)];
+    if (space) return { hide: '#87d0bc', dark: '#3f837b', mid: '#a0e0c8', light: '#d7f3de', belly: '#fff0aa', ridge: '#9ee8ff', eye: '#fff7a8' };
     return { hide: '#476f43', dark: '#27472d', mid: '#598d4d', light: '#83a85d', belly: '#c5b67a', ridge: '#d8b64f', eye: '#ffe176' };
-  }, [enemy, tone]);
+  }, [enemy, space, tone]);
   const bodyRef = useRef(null);
   const chestRef = useRef(null);
   const hipRef = useRef(null);
@@ -2499,8 +2914,9 @@ function ProceduralTRexModel({ size = 1, motionRef = null, variant = 'player', t
   );
 }
 
-function AssetTRexModel({ size = 1, motionRef = null, variant = 'player', tone = 0 }) {
+function AssetTRexModel({ size = 1, motionRef = null, variant = 'player', tone = 0, space = false }) {
   const enemy = variant === 'enemy';
+  const spacePlayer = space && !enemy;
   const gltf = useLoader(GLTFLoader, T_REX_MODEL_URL);
   const groupRef = useRef(null);
   const mixerRef = useRef(null);
@@ -2508,7 +2924,9 @@ function AssetTRexModel({ size = 1, motionRef = null, variant = 'player', tone =
 
   const { model, normalizeScale } = useMemo(() => {
     const cloned = cloneSkeleton(gltf.scene);
-    const tint = enemy
+    const tint = spacePlayer
+      ? new THREE.Color('#d9fff2')
+      : enemy
       ? new THREE.Color().setHSL(0.04 + clamp(tone, 0, 1) * 0.08, 0.55, 0.42)
       : new THREE.Color('#b7d879');
 
@@ -2520,7 +2938,11 @@ function AssetTRexModel({ size = 1, motionRef = null, variant = 'player', tone =
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       const clonedMaterials = materials.map((material) => {
         const next = material?.clone ? material.clone() : new THREE.MeshStandardMaterial({ color: '#7a9d4b' });
-        if (next.color) next.color.lerp(tint, enemy ? 0.34 : 0.12);
+        if (next.color) next.color.lerp(tint, spacePlayer ? 0.34 : enemy ? 0.34 : 0.12);
+        if (spacePlayer && next.emissive) {
+          next.emissive = new THREE.Color('#6ee7ff');
+          next.emissiveIntensity = Math.max(0.08, next.emissiveIntensity ?? 0);
+        }
         if ('roughness' in next) next.roughness = Math.max(0.68, next.roughness ?? 0.8);
         if ('metalness' in next) next.metalness = 0;
         return next;
@@ -2539,7 +2961,7 @@ function AssetTRexModel({ size = 1, motionRef = null, variant = 'player', tone =
       model: cloned,
       normalizeScale: T_REX_MODEL_TARGET_LENGTH / maxDimension,
     };
-  }, [enemy, gltf.scene, tone]);
+  }, [enemy, gltf.scene, spacePlayer, tone]);
 
   useEffect(() => {
     const clips = gltf.animations ?? [];
@@ -2613,7 +3035,7 @@ function FloatingEntity({ entity, registerEntityRef, playerSize, worldPhase }) {
   const entityRef = useRef(entity);
   entityRef.current = entity;
   const placement = useMemo(() => {
-    if (worldPhase >= 4) {
+    if (worldPhase === GLOBE_PHASE) {
       const normal = getGlobeSurfaceNormal(entity.position.x, entity.position.z);
       return {
         position: new THREE.Vector3(entity.position.x, getGlobeSurfaceHeight(entity.position.x, entity.position.z), entity.position.z).addScaledVector(normal, 0),
@@ -2642,17 +3064,32 @@ function FloatingEntity({ entity, registerEntityRef, playerSize, worldPhase }) {
 function RivalRex({ rival, playerSize, worldPhase }) {
   const groupRef = useRef(null);
   const rivalRef = useRef(rival);
+  const initializedRef = useRef(false);
+  const targetPosition = useMemo(() => new THREE.Vector3(), []);
+  const targetScale = useMemo(() => new THREE.Vector3(), []);
   rivalRef.current = rival;
 
-  useFrame((state) => {
+  useFrame((state, delta) => {
     if (!groupRef.current) return;
 
     const visualSize = getRivalVisualSize(rival.size, playerSize);
     const ground = getGroundHeight(rival.position.x, rival.position.z, worldPhase);
     const bob = Math.sin(state.clock.elapsedTime * 5.4 + rival.variantSeed * 8) * 0.025 * visualSize * (rival.walkAmount ?? 0);
-    groupRef.current.position.set(rival.position.x, ground + bob, rival.position.z);
-    groupRef.current.scale.setScalar(visualSize);
-    groupRef.current.rotation.y = rival.heading + Math.PI;
+    const alpha = getDampedAlpha(delta, 14);
+    targetPosition.set(rival.position.x, ground + bob, rival.position.z);
+    targetScale.setScalar(visualSize);
+
+    if (!initializedRef.current || groupRef.current.position.distanceToSquared(targetPosition) > 90000) {
+      groupRef.current.position.copy(targetPosition);
+      groupRef.current.scale.copy(targetScale);
+      groupRef.current.rotation.y = rival.heading + Math.PI;
+      initializedRef.current = true;
+      return;
+    }
+
+    groupRef.current.position.lerp(targetPosition, alpha);
+    groupRef.current.scale.lerp(targetScale, alpha);
+    groupRef.current.rotation.y = lerpAngle(groupRef.current.rotation.y, rival.heading + Math.PI, alpha);
   });
 
   return (
@@ -2735,34 +3172,144 @@ function RemotePlayer({ remotePlayer, playerRef, worldPhase }) {
   );
 }
 
-function Player({ playerRef, worldPhase }) {
-  const groupRef = useRef(null);
-  const surfaceScratch = useMemo(() => ({}), []);
+function SpacePlayerAura() {
+  const auraRef = useRef(null);
+  const ringRef = useRef(null);
 
   useFrame((state) => {
-    const player = playerRef.current;
-    if (!groupRef.current) return;
-
-    const visualSize = getVisualSize(player.size);
-    const bob = Math.sin(state.clock.elapsedTime * 6) * 0.03 * visualSize * (player.walkAmount ?? 0);
-    setObjectOnSurface(groupRef.current, player.position.x, player.position.z, worldPhase, player.heading + Math.PI, bob, surfaceScratch);
-    groupRef.current.scale.setScalar(visualSize);
+    const pulse = 1 + Math.sin(state.clock.elapsedTime * 2.2) * 0.035;
+    if (auraRef.current) auraRef.current.scale.setScalar(pulse);
+    if (ringRef.current) {
+      ringRef.current.rotation.z = state.clock.elapsedTime * 0.28;
+      ringRef.current.scale.setScalar(1 + Math.sin(state.clock.elapsedTime * 1.6) * 0.025);
+    }
   });
 
   return (
-    <group ref={groupRef}>
-      <TRexModel size={0.82} motionRef={playerRef} variant="player" />
+    <group>
+      <pointLight position={[0, 2.6, -1.8]} intensity={2.4} distance={8} decay={1.4} color="#bff8ff" />
+      <pointLight position={[0, 1.2, 1.6]} intensity={1.25} distance={7} decay={1.5} color="#ffe18f" />
+      <mesh ref={auraRef} position={[0, 1.28, 0]}>
+        <sphereGeometry args={[1.72, 40, 22]} />
+        <meshBasicMaterial color="#74e4ff" transparent opacity={0.11} depthWrite={false} side={THREE.DoubleSide} />
+      </mesh>
+      <mesh position={[0, 1.3, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[1.78, 0.035, 8, 96]} />
+        <meshBasicMaterial color="#fff0a6" transparent opacity={0.72} depthWrite={false} />
+      </mesh>
+      <mesh ref={ringRef} position={[0, 1.32, 0]} rotation={[0.82, 0.24, 0]}>
+        <torusGeometry args={[1.9, 0.026, 8, 96]} />
+        <meshBasicMaterial color="#7de9ff" transparent opacity={0.62} depthWrite={false} />
+      </mesh>
+      <mesh position={[0, 2.08, -0.18]}>
+        <sphereGeometry args={[0.18, 16, 10]} />
+        <meshBasicMaterial color="#fff5b8" transparent opacity={0.86} depthWrite={false} />
+      </mesh>
     </group>
   );
 }
 
-function EatBurst({ burst, worldPhase }) {
+function Player({ playerRef, worldPhase }) {
+  const groupRef = useRef(null);
+  const initializedRef = useRef(false);
+  const renderMotionRef = useRef(playerRef.current);
+  const targetPosition = useMemo(() => new THREE.Vector3(), []);
+  const targetQuaternion = useMemo(() => new THREE.Quaternion(), []);
+  const targetScale = useMemo(() => new THREE.Vector3(), []);
+  const surfaceScratch = useMemo(() => ({}), []);
+
+  useFrame((state, delta) => {
+    const player = playerRef.current;
+    if (!groupRef.current) return;
+
+    const inSpace = worldPhase >= ORBIT_PHASE;
+    const onGlobe = worldPhase === GLOBE_PHASE;
+    const visualSize = getVisualSize(player.size);
+    const ground = getGroundHeight(player.position.x, player.position.z, worldPhase);
+    const walkScale = inSpace ? 0.04 : onGlobe ? 0.16 : 1;
+    const bobScale = inSpace ? 0 : onGlobe ? 0.006 : 0.03;
+    const bob = Math.sin(state.clock.elapsedTime * 6) * bobScale * visualSize * (player.walkAmount ?? 0);
+    const alpha = getDampedAlpha(delta, inSpace ? 10 : 16);
+
+    if (onGlobe) {
+      const normal = surfaceScratch.normal || (surfaceScratch.normal = new THREE.Vector3());
+      getGlobeSurfaceNormal(player.position.x, player.position.z, normal);
+      targetPosition.set(player.position.x, ground, player.position.z).addScaledVector(normal, bob);
+      targetQuaternion.copy(getGlobeSurfaceQuaternion(player.position.x, player.position.z, player.heading + Math.PI, surfaceScratch));
+    } else {
+      targetPosition.set(player.position.x, ground + bob, player.position.z);
+      targetQuaternion.setFromAxisAngle(GLOBE_LOCAL_UP, player.heading + Math.PI);
+    }
+    targetScale.setScalar(visualSize);
+    renderMotionRef.current = {
+      ...player,
+      walkAmount: (player.walkAmount ?? 0) * walkScale,
+    };
+
+    if (!initializedRef.current || groupRef.current.position.distanceToSquared(targetPosition) > 4000000) {
+      groupRef.current.position.copy(targetPosition);
+      groupRef.current.scale.copy(targetScale);
+      groupRef.current.quaternion.copy(targetQuaternion);
+      initializedRef.current = true;
+      return;
+    }
+
+    groupRef.current.position.lerp(targetPosition, alpha);
+    groupRef.current.scale.lerp(targetScale, alpha);
+    groupRef.current.quaternion.slerp(targetQuaternion, alpha);
+  });
+
+  return (
+    <group ref={groupRef}>
+      {worldPhase >= ORBIT_PHASE && <SpacePlayerAura />}
+      <TRexModel size={0.82} motionRef={renderMotionRef} variant="player" space={worldPhase >= ORBIT_PHASE} />
+    </group>
+  );
+}
+
+function SpaceEatBurst({ burst }) {
+  const groupRef = useRef(null);
+  const radius = Math.max(140, safeNumber(burst.renderRadius, getVisualSize(burst.size) * 0.72));
+  const color = getSpaceBurstColor(burst.kind);
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+
+    const age = state.clock.elapsedTime - burst.createdAt;
+    const alpha = clamp(1 - age / 1.15, 0, 1);
+    groupRef.current.scale.setScalar(1 + age * 2.25);
+    groupRef.current.children.forEach((child) => {
+      if (child.material) child.material.opacity = alpha * (child.userData.opacityScale ?? 1);
+    });
+  });
+
+  return (
+    <group ref={groupRef} position={[burst.x, 0, burst.z]}>
+      <mesh userData={{ opacityScale: 0.22 }}>
+        <sphereGeometry args={[radius * 0.92, 32, 16]} />
+        <meshBasicMaterial color={color} transparent opacity={0.22} depthWrite={false} />
+      </mesh>
+      {[
+        [-Math.PI / 2, 0, 0],
+        [0, Math.PI / 2, 0],
+        [Math.PI / 2, 0, Math.PI / 2],
+      ].map((rotation, index) => (
+        <mesh key={index} rotation={rotation} userData={{ opacityScale: index === 0 ? 0.88 : 0.54 }}>
+          <ringGeometry args={[radius * 1.1, radius * 1.28, 96]} />
+          <meshBasicMaterial color={color} transparent opacity={index === 0 ? 0.88 : 0.54} depthWrite={false} side={THREE.DoubleSide} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function GroundEatBurst({ burst, worldPhase }) {
   const groupRef = useRef(null);
   const materialRef = useRef(null);
   const surfaceScratch = useMemo(() => ({}), []);
   const visualSize = getVisualSize(burst.size);
   const placement = useMemo(() => {
-    if (worldPhase >= 4) {
+    if (worldPhase === GLOBE_PHASE) {
       const normal = getGlobeSurfaceNormal(burst.x, burst.z);
       return {
         position: new THREE.Vector3(burst.x, getGlobeSurfaceHeight(burst.x, burst.z), burst.z).addScaledVector(normal, burst.y),
@@ -2792,6 +3339,10 @@ function EatBurst({ burst, worldPhase }) {
       </mesh>
     </group>
   );
+}
+
+function EatBurst({ burst, worldPhase }) {
+  return worldPhase >= ORBIT_PHASE ? <SpaceEatBurst burst={burst} /> : <GroundEatBurst burst={burst} worldPhase={worldPhase} />;
 }
 
 function SkyDome() {
@@ -2908,11 +3459,299 @@ function GlobeScenery({ scenery }) {
   );
 }
 
+function SpaceSky({ galaxyVisible }) {
+  const stars = useMemo(() => {
+    const count = galaxyVisible ? 980 : 640;
+    const positions = [];
+    const colors = [];
+    const color = new THREE.Color();
+
+    for (let index = 0; index < count; index += 1) {
+      const seed = 51000 + index * 37;
+      const radius = 420000 + seeded(seed) * 520000;
+      const theta = seeded(seed + 3) * Math.PI * 2;
+      const phi = Math.acos(2 * seeded(seed + 7) - 1);
+      positions.push(
+        Math.sin(phi) * Math.cos(theta) * radius,
+        Math.cos(phi) * radius,
+        Math.sin(phi) * Math.sin(theta) * radius,
+      );
+
+      color.set(seeded(seed + 11) > 0.74 ? '#ffe4ad' : seeded(seed + 13) > 0.64 ? '#b8d8ff' : '#ffffff');
+      colors.push(color.r, color.g, color.b);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    return geometry;
+  }, [galaxyVisible]);
+
+  const galaxy = useMemo(() => {
+    if (!galaxyVisible) return null;
+
+    const positions = [];
+    const colors = [];
+    const color = new THREE.Color();
+    const arms = 4;
+    const count = 1800;
+
+    for (let index = 0; index < count; index += 1) {
+      const seed = 62000 + index * 19;
+      const arm = index % arms;
+      const t = seeded(seed);
+      const radius = 12000 + Math.pow(t, 0.72) * 340000;
+      const twist = radius / 43000;
+      const angle = (arm / arms) * Math.PI * 2 + twist + (seeded(seed + 5) - 0.5) * 0.52;
+      const spread = (seeded(seed + 9) - 0.5) * (2400 + radius * 0.032);
+      positions.push(
+        Math.cos(angle) * radius + Math.cos(angle + Math.PI / 2) * spread,
+        (seeded(seed + 13) - 0.5) * (2200 + radius * 0.012),
+        Math.sin(angle) * radius + Math.sin(angle + Math.PI / 2) * spread,
+      );
+
+      color.set(t < 0.18 ? '#ffe2a2' : seeded(seed + 17) > 0.52 ? '#d7e6ff' : '#fff6d8');
+      colors.push(color.r, color.g, color.b);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    return geometry;
+  }, [galaxyVisible]);
+
+  return (
+    <>
+      <color attach="background" args={['#02050d']} />
+      <points geometry={stars}>
+        <pointsMaterial size={galaxyVisible ? 130 : 110} vertexColors transparent opacity={0.86} sizeAttenuation depthWrite={false} />
+      </points>
+      {galaxy && (
+        <points geometry={galaxy} rotation={[0.16, -0.26, 0.08]}>
+          <pointsMaterial size={130} vertexColors transparent opacity={0.58} sizeAttenuation depthWrite={false} />
+        </points>
+      )}
+    </>
+  );
+}
+
+function SpaceOrbitRings({ bodies }) {
+  const rings = useMemo(() => {
+    const systemCenters = new Map([
+      ['sol', { x: 0, z: 0 }],
+      ...NEIGHBOR_SYSTEMS.map((system) => [system.id, { x: system.x, z: system.z }]),
+    ]);
+
+    return bodies
+      .filter((body) => body.orbitDistance > 1000 && body.kind !== 'moon' && body.kind !== 'sun' && body.kind !== 'star')
+      .map((body) => {
+        const center = systemCenters.get(body.systemId) ?? { x: 0, z: 0 };
+        return {
+          id: `orbit:${body.id}`,
+          x: center.x,
+          z: center.z,
+          radius: body.orbitDistance,
+          opacity: body.systemId === 'sol' ? 0.2 : 0.14,
+        };
+      });
+  }, [bodies]);
+
+  return (
+    <group>
+      {rings.map((ring) => (
+        <mesh key={ring.id} position={[ring.x, -8, ring.z]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[Math.max(1, ring.radius - 9), ring.radius + 9, 160]} />
+          <meshBasicMaterial color="#8aa4c8" transparent opacity={ring.opacity} depthWrite={false} side={THREE.DoubleSide} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+const getSpaceLabelState = (body, edible) => {
+  if (body.decorative) return { text: 'HOME', color: '#9ed7ff', background: 'rgba(18, 46, 66, 0.78)' };
+  if (edible) return { text: 'EDIBLE', color: '#96ff9e', background: 'rgba(16, 54, 30, 0.78)' };
+  return { text: 'TOO BIG', color: '#ffbd72', background: 'rgba(69, 42, 22, 0.78)' };
+};
+
+const createSpaceLabelTexture = (name, stateText, stateColor, background) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 192;
+  const ctx = canvas.getContext('2d');
+  const borderColor = stateColor;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = background;
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.roundRect(10, 10, canvas.width - 20, canvas.height - 20, 18);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 54px Inter, Arial, sans-serif';
+  ctx.fillText(String(name).toUpperCase(), canvas.width / 2, 73, canvas.width - 56);
+
+  ctx.fillStyle = stateColor;
+  ctx.font = '800 36px Inter, Arial, sans-serif';
+  ctx.fillText(stateText, canvas.width / 2, 136, canvas.width - 56);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+};
+
+function SpaceBodyLabel({ body, edible }) {
+  const radius = body.renderRadius;
+  const labelState = getSpaceLabelState(body, edible);
+  const texture = useMemo(
+    () => createSpaceLabelTexture(body.name, labelState.text, labelState.color, labelState.background),
+    [body.name, labelState.background, labelState.color, labelState.text],
+  );
+  const width = clamp(radius * 2.8, 560, 1480);
+  const height = width * 0.375;
+
+  useEffect(() => () => texture.dispose(), [texture]);
+
+  return (
+    <sprite position={[0, radius * 1.48 + height * 0.24, 0]} scale={[width, height, 1]} renderOrder={20}>
+      <spriteMaterial map={texture} transparent depthTest={false} depthWrite={false} />
+    </sprite>
+  );
+}
+
+function SpaceBody({ body, playerSize }) {
+  const groupRef = useRef(null);
+  const radius = body.renderRadius;
+  const edible = isSpaceBodyEdibleBy(body, playerSize);
+  const labelState = getSpaceLabelState(body, edible);
+  const hot = body.kind === 'sun' || body.kind === 'star';
+  const asteroid = body.kind === 'asteroid';
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const spin = hot ? 0.055 : asteroid ? 0.22 : 0.075;
+    groupRef.current.rotation.y = body.seed * 0.001 + state.clock.elapsedTime * spin;
+    if (asteroid) {
+      groupRef.current.rotation.x = Math.sin(state.clock.elapsedTime * 0.18 + body.seed) * 0.16;
+      groupRef.current.rotation.z = Math.cos(state.clock.elapsedTime * 0.14 + body.seed) * 0.12;
+    }
+  });
+
+  const bandYs = [-0.48, -0.26, -0.08, 0.14, 0.34];
+
+  return (
+    <group position={[body.x, 0, body.z]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[radius * 1.26, radius * 1.31, 80]} />
+        <meshBasicMaterial color={labelState.color} transparent opacity={body.decorative ? 0.24 : edible ? 0.58 : 0.22} depthWrite={false} side={THREE.DoubleSide} />
+      </mesh>
+      <group ref={groupRef}>
+        {hot ? (
+          <>
+            <mesh>
+              <sphereGeometry args={[radius, 64, 36]} />
+              <meshBasicMaterial color={body.color} />
+            </mesh>
+            <mesh scale={1.22}>
+              <sphereGeometry args={[radius, 48, 24]} />
+              <meshBasicMaterial color={body.emissive || body.color} transparent opacity={0.2} depthWrite={false} side={THREE.BackSide} />
+            </mesh>
+            <mesh scale={1.62}>
+              <sphereGeometry args={[radius, 48, 24]} />
+              <meshBasicMaterial color={body.secondaryColor} transparent opacity={0.08} depthWrite={false} side={THREE.BackSide} />
+            </mesh>
+          </>
+        ) : asteroid ? (
+          <mesh scale={[1.12, 0.82 + seeded(body.seed + 3) * 0.42, 0.94 + seeded(body.seed + 9) * 0.36]} castShadow receiveShadow>
+            <icosahedronGeometry args={[radius, 1]} />
+            <meshStandardMaterial color={body.color} roughness={0.96} metalness={0.03} />
+          </mesh>
+        ) : (
+          <>
+            <mesh castShadow receiveShadow>
+              <sphereGeometry args={[radius, 48, 28]} />
+              <meshStandardMaterial color={body.color} roughness={0.72} metalness={0.01} emissive={body.emissive} emissiveIntensity={0.02} />
+            </mesh>
+            {body.kind === 'earth' && (
+              <>
+                {[0.2, 1.84, 3.46, 4.82].map((angle, index) => (
+                  <mesh
+                    key={`continent-${index}`}
+                    position={[Math.cos(angle) * radius * 0.62, (index % 2 ? -0.12 : 0.16) * radius, Math.sin(angle) * radius * 0.62]}
+                    scale={[radius * 0.0068, radius * 0.0038, radius * 0.0045]}
+                    rotation={[0.3, -angle, 0.12]}
+                  >
+                    <sphereGeometry args={[radius, 20, 12]} />
+                    <meshStandardMaterial color={body.secondaryColor} roughness={0.8} />
+                  </mesh>
+                ))}
+              </>
+            )}
+            {body.banded &&
+              bandYs.map((yFactor, index) => {
+                const y = radius * yFactor;
+                const bandRadius = Math.sqrt(Math.max(0, radius * radius - y * y)) * 1.01;
+                return (
+                  <mesh key={`band-${index}`} position={[0, y, 0]} rotation={[Math.PI / 2, 0, 0]}>
+                    <torusGeometry args={[bandRadius, radius * (index % 2 ? 0.012 : 0.018), 7, 96]} />
+                    <meshStandardMaterial color={index % 2 ? body.secondaryColor : '#f2dfbd'} roughness={0.78} />
+                  </mesh>
+                );
+              })}
+            {body.atmosphere && (
+              <mesh scale={1.045}>
+                <sphereGeometry args={[radius, 48, 24]} />
+                <meshBasicMaterial color={body.atmosphere} transparent opacity={0.16} depthWrite={false} side={THREE.BackSide} />
+              </mesh>
+            )}
+            {body.ring && (
+              <mesh rotation={[Math.PI / 2.35, 0.32, 0.08]}>
+                <torusGeometry args={[radius * 1.72, radius * 0.042, 10, 144]} />
+                <meshStandardMaterial color="#d7c392" transparent opacity={0.86} roughness={0.68} side={THREE.DoubleSide} />
+              </mesh>
+            )}
+          </>
+        )}
+      </group>
+      <SpaceBodyLabel body={body} edible={edible} />
+    </group>
+  );
+}
+
+function SpaceBodies({ bodies, playerSize }) {
+  return (
+    <group>
+      {bodies.map((body) => (
+        <SpaceBody key={body.id} body={body} playerSize={playerSize} />
+      ))}
+    </group>
+  );
+}
+
+function SpaceWorld({ bodies, playerSize, worldPhase }) {
+  const galaxyVisible = worldPhase >= GALAXY_PHASE;
+
+  return (
+    <>
+      <SpaceSky galaxyVisible={galaxyVisible} />
+      <SpaceOrbitRings bodies={bodies} />
+      <SpaceBodies bodies={bodies} playerSize={playerSize} />
+    </>
+  );
+}
+
 function WorldTiles({ phase, won }) {
   const tiles = useMemo(() => getTilesForPhase(phase), [phase]);
   const waterSize = COUNTRY_SIZE * (getTileRadiusForPhase(phase) * 2 + 1) + 900;
 
-  if (phase >= 4) return <GlobeWorld won={won} />;
+  if (phase >= ORBIT_PHASE) return null;
+  if (phase === GLOBE_PHASE) return <GlobeWorld won={won} />;
 
   return (
     <group>
@@ -2939,9 +3778,11 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     bananas: 0,
     monkeys: 0,
     objects: 0,
+    systems: 0,
     eaten: 0,
     score: 0,
     elapsedSeconds: 0,
+    currentSpeed: 0,
     walkAmount: 0,
     munchUntil: 0,
     eatCooldown: 0,
@@ -2951,6 +3792,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
   });
   const entitiesRef = useRef(initialEntities());
   const sceneryRef = useRef(createSceneryForPhase(0));
+  const spaceBodiesRef = useRef([]);
+  const consumedSpaceBodyIdsRef = useRef(new Set());
   const rivalsRef = useRef(initialRivals());
   const worldPhaseRef = useRef(0);
   const multiplayerPlayerId = useMemo(() => loadMultiplayerPlayerId(), []);
@@ -2965,6 +3808,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
   const burstsRef = useRef([]);
   const [entitiesVersion, setEntitiesVersion] = useState(0);
   const [sceneryVersion, setSceneryVersion] = useState(0);
+  const [spaceBodiesVersion, setSpaceBodiesVersion] = useState(0);
   const [rivalsVersion, setRivalsVersion] = useState(0);
   const [burstsVersion, setBurstsVersion] = useState(0);
   const [remotePlayersVersion, setRemotePlayersVersion] = useState(0);
@@ -2972,8 +3816,11 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
   const lastStatsRef = useRef(0);
   const tempVector = useMemo(() => new THREE.Vector3(), []);
   const targetVector = useMemo(() => new THREE.Vector3(), []);
+  const smoothTargetVector = useMemo(() => new THREE.Vector3(), []);
   const cameraOffset = useMemo(() => new THREE.Vector3(), []);
   const entitySurfaceScratch = useMemo(() => ({}), []);
+  const desiredCameraPosition = useMemo(() => new THREE.Vector3(), []);
+  const cameraInitializedRef = useRef(false);
 
   const publishStats = useCallback(
     (force = false) => {
@@ -2984,6 +3831,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
 
       const size = player.size;
       const phase = getWorldPhase(size);
+      const inSpace = worldPhaseRef.current >= ORBIT_PHASE;
+      const target = inSpace ? getSpaceHudTarget(spaceBodiesRef.current, player.position, size) : null;
       const strength = Math.max(1, Math.pow(Math.max(1, safeNumber(size)), 1.42) * 12);
       const visibleRemotePlayers = remotePlayersRef.current.filter((remotePlayer) => !remotePlayer.lost && remotePlayer.phase === phase).length;
       onStats({
@@ -2998,6 +3847,10 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         players: visibleRemotePlayers + 1,
         spawnDensity: `${getSpawnMultiplier(inputRef.current.spawnMultiplier)}x`,
         world: getPhaseLabel(phase),
+        spaceMode: inSpace,
+        speed: `${formatMagnitude(safeNumber(player.currentSpeed, 0), 1)}/s`,
+        targetName: target ? `${getSpaceHudName(target.body)}${target.edible ? '' : ' +'}` : 'Target',
+        targetDistance: target ? formatMagnitude(target.distance, 1) : '--',
       });
     },
     [inputRef, onStats],
@@ -3188,6 +4041,8 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
   );
 
   const refillEntities = useCallback(() => {
+    if (worldPhaseRef.current >= ORBIT_PHASE) return;
+
     const entities = entitiesRef.current;
     const player = playerRef.current;
     const worldLimit = getWorldLimit(worldPhaseRef.current);
@@ -3205,6 +4060,18 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
 
     sceneryRef.current = [...sceneryRef.current, ...additions];
     setSceneryVersion((value) => value + 1);
+  }, []);
+
+  const ensureSpaceBodiesForPhase = useCallback((phase) => {
+    if (phase < ORBIT_PHASE) return;
+
+    const existingIds = new Set(spaceBodiesRef.current.map((item) => item.id));
+    const consumedIds = consumedSpaceBodyIdsRef.current;
+    const additions = createSpaceBodiesForPhase(phase).filter((item) => !existingIds.has(item.id) && !consumedIds.has(item.id));
+    if (additions.length === 0) return;
+
+    spaceBodiesRef.current = [...spaceBodiesRef.current, ...additions];
+    setSpaceBodiesVersion((value) => value + 1);
   }, []);
 
   const ensureRivalsForPhase = useCallback((phase) => {
@@ -3226,16 +4093,19 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     const startPhase = getWorldPhase(requestedStartSize);
     multiplayerSpawnTokenRef.current = createUniqueId();
     pendingEatClaimsRef.current.clear();
+    const startPosition = startPhase >= ORBIT_PHASE ? getSpaceEntryPosition() : new THREE.Vector3(0, 0, 0);
     playerRef.current = {
-      position: new THREE.Vector3(0, 0, 0),
+      position: startPosition,
       size: requestedStartSize,
       heading: 0,
       bananas: 0,
       monkeys: 0,
       objects: 0,
+      systems: 0,
       eaten: 0,
       score: 0,
       elapsedSeconds: 0,
+      currentSpeed: 0,
       walkAmount: 0,
       munchUntil: 0,
       eatCooldown: 0,
@@ -3245,12 +4115,15 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     };
     entitiesRef.current = initialEntities(startPhase, requestedStartSize);
     sceneryRef.current = createSceneryForPhase(startPhase);
+    consumedSpaceBodyIdsRef.current = new Set();
+    spaceBodiesRef.current = createSpaceBodiesForPhase(startPhase);
     rivalsRef.current = initialRivals(requestedStartSize, startPhase);
     worldPhaseRef.current = startPhase;
     burstsRef.current = [];
     setWorldPhase(startPhase);
     setEntitiesVersion((value) => value + 1);
     setSceneryVersion((value) => value + 1);
+    setSpaceBodiesVersion((value) => value + 1);
     setRivalsVersion((value) => value + 1);
     setBurstsVersion((value) => value + 1);
     publishStats(true);
@@ -3326,13 +4199,28 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     }
     const activePhase = getWorldPhase(player.size);
     if (activePhase > worldPhaseRef.current) {
+      const previousPhase = worldPhaseRef.current;
       worldPhaseRef.current = activePhase;
-      ensureSceneryForPhase(activePhase);
-      ensureRivalsForPhase(activePhase);
+      if (activePhase >= ORBIT_PHASE) {
+        if (previousPhase < ORBIT_PHASE) {
+          player.position.copy(getSpaceEntryPosition());
+          player.heading = Math.PI / 2;
+          entitiesRef.current = [];
+          sceneryRef.current = [];
+          rivalsRef.current = [];
+          setEntitiesVersion((value) => value + 1);
+          setSceneryVersion((value) => value + 1);
+          setRivalsVersion((value) => value + 1);
+        }
+        ensureSpaceBodiesForPhase(activePhase);
+      } else {
+        ensureSceneryForPhase(activePhase);
+        ensureRivalsForPhase(activePhase);
+      }
       setWorldPhase(activePhase);
       publishStats(true);
     }
-    if (!player.won && activePhase >= 4 && player.size >= FINAL_GLOBE_SIZE) {
+    if (!player.won && activePhase >= GALAXY_PHASE && player.size >= GALAXY_VISIBLE_SIZE) {
       player.won = true;
       player.munchUntil = state.clock.elapsedTime + 0.8;
       onWin(getPlayerSummary(player));
@@ -3340,14 +4228,22 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     }
 
     const targetEntityCount = getTargetEntityCount(inputRef.current.spawnMultiplier);
-    if (!player.lost && entitiesRef.current.length < targetEntityCount) {
-      refillEntities();
-      setEntitiesVersion((value) => value + 1);
-      publishStats(true);
-    } else if (entitiesRef.current.length > targetEntityCount * 1.08) {
-      entitiesRef.current = entitiesRef.current.slice(0, targetEntityCount);
-      setEntitiesVersion((value) => value + 1);
-      publishStats(true);
+    if (worldPhaseRef.current >= ORBIT_PHASE) {
+      if (entitiesRef.current.length > 0) {
+        entitiesRef.current = [];
+        setEntitiesVersion((value) => value + 1);
+        publishStats(true);
+      }
+    } else {
+      if (!player.lost && entitiesRef.current.length < targetEntityCount) {
+        refillEntities();
+        setEntitiesVersion((value) => value + 1);
+        publishStats(true);
+      } else if (entitiesRef.current.length > targetEntityCount * 1.08) {
+        entitiesRef.current = entitiesRef.current.slice(0, targetEntityCount);
+        setEntitiesVersion((value) => value + 1);
+        publishStats(true);
+      }
     }
 
     if (playerReady && !pausedRef.current && !player.lost) {
@@ -3373,11 +4269,15 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         player.position.x = nextPosition.x;
         player.position.z = nextPosition.z;
         player.heading = Math.atan2(tempVector.x, tempVector.z);
+        player.currentSpeed = speed;
+      } else {
+        player.currentSpeed = 0;
       }
 
       let ateSomething = false;
       let entitiesChanged = false;
       let sceneryChanged = false;
+      let spaceBodiesChanged = false;
       let rivalsChanged = false;
       let playerWasEaten = false;
       const worldLimit = getWorldLimit(worldPhaseRef.current);
@@ -3410,7 +4310,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
           entity.renderAngle = (Number.isFinite(entity.renderAngle) ? entity.renderAngle : entity.angle) + spinSpeed * dt;
           const renderYaw = MOVING_ENTITY_KINDS.has(entity.kind) ? entity.angle : entity.renderAngle;
 
-          if (worldPhaseRef.current >= 4) {
+          if (worldPhaseRef.current === GLOBE_PHASE) {
             setObjectOnSurface(objectRef.current, entity.position.x, entity.position.z, worldPhaseRef.current, renderYaw, float, entitySurfaceScratch);
           } else {
             objectRef.current.position.set(entity.position.x, terrainHeight(entity.position.x, entity.position.z) + float, entity.position.z);
@@ -3422,12 +4322,12 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       let workingEntities = entitiesRef.current;
       let workingScenery = sceneryRef.current;
 
-      if (worldPhaseRef.current >= 4 && rivalsRef.current.length > 0) {
+      if (worldPhaseRef.current >= GLOBE_PHASE && rivalsRef.current.length > 0) {
         rivalsRef.current = [];
         rivalsChanged = true;
       }
 
-      if (worldPhaseRef.current < 4) {
+      if (worldPhaseRef.current < GLOBE_PHASE) {
         for (const rival of rivalsRef.current) {
           const rivalVisualSize = getVisualSize(rival.size);
           const rivalRadius = Math.max(1.1, rivalVisualSize * 0.88);
@@ -3677,6 +4577,49 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         }
       }
 
+      if (worldPhaseRef.current >= ORBIT_PHASE) {
+        const nextSpaceBodies = [];
+
+        for (const body of spaceBodiesRef.current) {
+          const dist = Math.hypot(body.x - player.position.x, body.z - player.position.z);
+          const bodyRadius = Math.max(18, body.renderRadius * (body.kind === 'sun' || body.kind === 'star' ? 0.84 : 0.92));
+          const collision = dist < playerRadius + bodyRadius;
+          const edible = isSpaceBodyEdibleBy(body, player.size);
+          const canEatSpaceBody = (player.eatCooldown ?? 0) <= 0;
+
+          if (edible && collision && canEatSpaceBody) {
+            const growth = getSpaceBodyGrowth(body);
+            player.score = Math.round(safeNumber(player.score, 0) + getEatScore(body.kind, body.size, player.size, growth));
+            player.size = addGrowth(player.size, growth);
+            player.eaten += 1;
+            player.objects += 1;
+            if (body.kind === 'sun' || body.kind === 'star') player.systems = safeNumber(player.systems, 0) + 1;
+            player.munchUntil = state.clock.elapsedTime + (body.kind === 'sun' || body.kind === 'star' ? 1.05 : 0.64);
+            player.eatCooldown = getPlayerEatCooldown(body.kind, player.size);
+            consumedSpaceBodyIdsRef.current.add(body.id);
+            burstsRef.current.push({
+              id: `${body.id}-space-burst-${player.eaten}`,
+              x: body.x,
+              z: body.z,
+              y: Math.max(20, body.renderRadius * 0.55),
+              size: Math.max(120, body.size),
+              renderRadius: body.renderRadius,
+              kind: body.kind,
+              createdAt: state.clock.elapsedTime,
+            });
+            ateSomething = true;
+            spaceBodiesChanged = true;
+          } else {
+            nextSpaceBodies.push(body);
+          }
+        }
+
+        if (spaceBodiesChanged) {
+          spaceBodiesRef.current = nextSpaceBodies;
+          setSpaceBodiesVersion((value) => value + 1);
+        }
+      }
+
       if (sceneryChanged) {
         sceneryRef.current = nextScenery;
         setSceneryVersion((value) => value + 1);
@@ -3777,9 +4720,11 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       }
 
       entitiesRef.current = nextEntities;
-      if (ateSomething || entitiesChanged || sceneryChanged || rivalsChanged) {
-        refillEntities();
-        setEntitiesVersion((value) => value + 1);
+      if (ateSomething || entitiesChanged || sceneryChanged || spaceBodiesChanged || rivalsChanged) {
+        if (worldPhaseRef.current < ORBIT_PHASE) {
+          refillEntities();
+          setEntitiesVersion((value) => value + 1);
+        }
         setBurstsVersion((value) => value + 1);
         publishStats(true);
       } else {
@@ -3814,14 +4759,17 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     const zoom = clamp(safeNumber(cameraControls?.zoom, 1), CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
     const yaw = safeNumber(cameraControls?.yaw, 0);
     const pitchOffset = clamp(safeNumber(cameraControls?.pitch, 0), CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
-    const baseHeight = Math.max(22, visualSize * 6.2);
-    const baseDistance = Math.max(38, visualSize * 9);
+    const inSpace = worldPhaseRef.current >= ORBIT_PHASE;
+    const baseHeight = inSpace ? Math.max(360, visualSize * 3.6) : Math.max(22, visualSize * 6.2);
+    const baseDistance = inSpace ? Math.max(760, visualSize * 8.8) : Math.max(38, visualSize * 9);
     const orbitDistance = Math.hypot(baseHeight, baseDistance) * zoom;
     const pitch = clamp(Math.atan2(baseHeight, baseDistance) + pitchOffset, 0.18, 1.18);
     const horizontalDistance = Math.cos(pitch) * orbitDistance;
     const verticalDistance = Math.sin(pitch) * orbitDistance;
     const playerGround = getGroundHeight(player.position.x, player.position.z, worldPhaseRef.current);
-    if (worldPhaseRef.current >= 4) {
+    if (inSpace) {
+      targetVector.set(player.position.x, playerGround + visualSize * 0.45, player.position.z);
+    } else if (worldPhaseRef.current === GLOBE_PHASE) {
       const normal = entitySurfaceScratch.cameraNormal || (entitySurfaceScratch.cameraNormal = new THREE.Vector3());
       getGlobeSurfaceNormal(player.position.x, player.position.z, normal);
       targetVector.set(player.position.x, playerGround, player.position.z).addScaledVector(normal, visualSize * 1.25);
@@ -3829,10 +4777,18 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       targetVector.set(player.position.x, playerGround + visualSize * 1.25, player.position.z);
     }
     cameraOffset.set(Math.sin(yaw) * horizontalDistance, verticalDistance, Math.cos(yaw) * horizontalDistance);
-    camera.position.lerp(targetVector.clone().add(cameraOffset), 1 - Math.exp(-dt * 2.8));
-    camera.lookAt(targetVector);
-    camera.near = clamp(visualSize * 0.018, 0.1, 500);
-    camera.far = Math.min(260000, Math.max(7200, worldLimit * 4 + visualSize * 80));
+    if (!cameraInitializedRef.current || smoothTargetVector.distanceToSquared(targetVector) > 8000000) {
+      smoothTargetVector.copy(targetVector);
+      camera.position.copy(desiredCameraPosition.copy(smoothTargetVector).add(cameraOffset));
+      cameraInitializedRef.current = true;
+    } else {
+      smoothTargetVector.lerp(targetVector, getDampedAlpha(dt, inSpace ? 6.8 : 10.5));
+      desiredCameraPosition.copy(smoothTargetVector).add(cameraOffset);
+      camera.position.lerp(desiredCameraPosition, getDampedAlpha(dt, inSpace ? 4.8 : 7.4));
+    }
+    camera.lookAt(smoothTargetVector);
+    camera.near = clamp(visualSize * 0.018, 0.1, inSpace ? 1200 : 500);
+    camera.far = inSpace ? 1600000 : Math.min(260000, Math.max(7200, worldLimit * 4 + visualSize * 80));
     camera.updateProjectionMatrix();
 
     if (import.meta.env.DEV) {
@@ -3840,11 +4796,15 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         x: player.position.x,
         z: player.position.z,
         size: player.size,
-        speed: getMoveSpeed(player.size, worldPhaseRef.current),
+        speed: safeNumber(player.currentSpeed, 0),
+        maxSpeed: getMoveSpeed(player.size, worldPhaseRef.current),
         worldPhase: getPhaseLabel(worldPhaseRef.current),
-        groundMode: worldPhaseRef.current >= 4 ? 'globe' : 'terrain',
+        groundMode: worldPhaseRef.current >= ORBIT_PHASE ? 'space' : worldPhaseRef.current === GLOBE_PHASE ? 'globe' : 'terrain',
         groundY: playerGround,
         sceneryCount: sceneryRef.current.length,
+        spaceBodyCount: spaceBodiesRef.current.length,
+        edibleSpaceBodies: spaceBodiesRef.current.filter((body) => isSpaceBodyEdibleBy(body, player.size)).length,
+        systems: safeNumber(player.systems, 0),
         entityCount: entitiesRef.current.length,
         targetEntityCount: getTargetEntityCount(inputRef.current.spawnMultiplier),
         spawnMultiplier: getSpawnMultiplier(inputRef.current.spawnMultiplier),
@@ -3860,29 +4820,32 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
 
   const entities = entitiesRef.current;
   const scenery = sceneryRef.current;
+  const spaceBodies = spaceBodiesRef.current;
   const rivals = rivalsRef.current;
   const remotePlayers = remotePlayersRef.current.filter((remotePlayer) => !remotePlayer.lost && !remotePlayer.won && remotePlayer.phase === worldPhase);
   const bursts = burstsRef.current;
   void entitiesVersion;
   void sceneryVersion;
+  void spaceBodiesVersion;
   void rivalsVersion;
   void remotePlayersVersion;
   void burstsVersion;
 
   return (
     <>
-      <SkyDome />
-      <SceneLighting />
+      {worldPhase < ORBIT_PHASE && <SkyDome />}
+      <SceneLighting space={worldPhase >= ORBIT_PHASE} />
       <WorldTiles phase={worldPhase} won={gameWon} />
-      {worldPhase < 4 && <Trees scenery={scenery} />}
-      {worldPhase < 4 && <Houses scenery={scenery} />}
-      {worldPhase < 4 && <CityObjects scenery={scenery} />}
-      {worldPhase < 4 && <Mountains scenery={scenery} />}
-      {worldPhase >= 4 && <GlobeScenery scenery={scenery} />}
+      {worldPhase >= ORBIT_PHASE && <SpaceWorld bodies={spaceBodies} playerSize={playerRef.current.size} worldPhase={worldPhase} />}
+      {worldPhase < GLOBE_PHASE && <Trees scenery={scenery} />}
+      {worldPhase < GLOBE_PHASE && <Houses scenery={scenery} />}
+      {worldPhase < GLOBE_PHASE && <CityObjects scenery={scenery} />}
+      {worldPhase < GLOBE_PHASE && <Mountains scenery={scenery} />}
+      {worldPhase === GLOBE_PHASE && <GlobeScenery scenery={scenery} />}
       {entities.map((entity) => (
         <FloatingEntity key={entity.id} entity={entity} registerEntityRef={registerEntityRef} playerSize={playerRef.current.size} worldPhase={worldPhase} />
       ))}
-      {worldPhase < 4 && rivals.map((rival) => <RivalRex key={rival.id} rival={rival} playerSize={playerRef.current.size} worldPhase={worldPhase} />)}
+      {worldPhase < GLOBE_PHASE && rivals.map((rival) => <RivalRex key={rival.id} rival={rival} playerSize={playerRef.current.size} worldPhase={worldPhase} />)}
       {remotePlayers.map((remotePlayer) => (
         <RemotePlayer key={remotePlayer.id} remotePlayer={remotePlayer} playerRef={playerRef} worldPhase={worldPhase} />
       ))}
@@ -3962,7 +4925,7 @@ function WinPanel({ result, playerName, scoreSaved, scoreSaving, scoreSaveNotice
   return (
     <div className="end-panel win-panel" role="dialog" aria-modal="true" aria-labelledby="win-title">
       <strong id="win-title">YOU WON</strong>
-      <span>Globe consumed</span>
+      <span>{result?.world === 'Galaxy' ? 'Galaxy revealed' : 'Globe consumed'}</span>
       <RunSummary result={result} />
 
       {!scoreSaved ? (
@@ -4104,6 +5067,10 @@ function App() {
     players: 1,
     spawnDensity: `${DEFAULT_SPAWN_MULTIPLIER}x`,
     world: 'Country',
+    spaceMode: false,
+    speed: '0/s',
+    targetName: 'Target',
+    targetDistance: '--',
   });
   const [paused, setPaused] = useState(true);
   const [playerReady, setPlayerReady] = useState(false);

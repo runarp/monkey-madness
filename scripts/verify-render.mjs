@@ -11,7 +11,8 @@ const scenarios = [
   { name: 'ipad-touch', width: 820, height: 720, isMobile: true, expectTouchControls: true, expectTouchCameraControls: true, expectStarterSnack: true, expectRivals: true, maxSpawnRivalRatio: 0.96 },
   { name: 'mountain-speed', width: 1440, height: 900, isMobile: false, startSize: '130', expectStarterSnack: false, expectWorld: 'Mountains', expectObjects: true, expectRivals: true, minDistance: 250, maxSize: 180, maxSpawnRivalRatio: 0.96 },
   { name: 'globe-surface', width: 1440, height: 900, isMobile: false, startSize: '340', expectStarterSnack: false, expectWorld: 'Globe', expectGlobeSurface: true, expectGlobeScenery: true, maxSize: 390 },
-  { name: 'globe-finale', width: 1440, height: 900, isMobile: false, startSize: '950', expectStarterSnack: false, expectWorld: 'Globe', expectEndPanel: true },
+  { name: 'solar-orbit', width: 1440, height: 900, isMobile: false, startSize: '950', expectStarterSnack: false, expectWorld: 'Orbit', expectSpace: true, expectSpaceBodies: true, expectSpaceHud: true, minDistance: 900, maxSize: 1050 },
+  { name: 'galaxy-finale', width: 1440, height: 900, isMobile: false, startSize: '130000', expectStarterSnack: false, expectWorld: 'Galaxy', expectSpace: true, expectEndPanel: true },
 ];
 
 await mkdir(artifactDir, { recursive: true });
@@ -228,6 +229,22 @@ for (const viewport of scenarios) {
   }
   if (viewport.expectGlobeScenery && debugAfter?.sceneryCount < 1) {
     failures.push(`${viewport.name}: expected globe scenery to render, got scenery count ${debugAfter?.sceneryCount}`);
+  }
+  if (viewport.expectSpace && debugAfter?.groundMode !== 'space') {
+    failures.push(`${viewport.name}: expected player to fly in space, got ${JSON.stringify(debugAfter)}`);
+  }
+  if (viewport.expectSpaceBodies && debugAfter?.spaceBodyCount < 8) {
+    failures.push(`${viewport.name}: expected space bodies to render, got space body count ${debugAfter?.spaceBodyCount}`);
+  }
+  if (viewport.expectSpaceHud) {
+    const standardLabels = new Set(['Size', 'Strength', 'Score', 'Time', 'Snacks', 'Critters', 'Objects', 'Rivals', 'Spawns', 'World', 'Speed']);
+    const targetLabels = Object.keys(hudStats).filter((label) => !standardLabels.has(label));
+    if (!hudStats.Speed || !/\/s$/.test(hudStats.Speed)) {
+      failures.push(`${viewport.name}: expected space speedometer in HUD, got ${JSON.stringify(hudStats)}`);
+    }
+    if (targetLabels.length < 1 || !hudStats[targetLabels[0]]) {
+      failures.push(`${viewport.name}: expected space target distance in HUD, got ${JSON.stringify(hudStats)}`);
+    }
   }
   if (viewport.minDistance && debugBefore && debugAfter) {
     const distance = Math.hypot(debugAfter.x - debugBefore.x, debugAfter.z - debugBefore.z);
