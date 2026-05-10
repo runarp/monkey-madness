@@ -10,11 +10,11 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 - Name your T-Rex before each browser session starts.
 - Start with tiny snacks like ants, worms, flowers, brush, and signposts.
 - Grow into eating trees, cars, houses, buildings, towers, mountains, and eventually planet-scale objects.
+- Ground progression is split into authored boards defined in `src/boards.js`, with fixed groups of snacks, grass, flowers, houses, cars, city blocks, forests, and mountains.
 - After the globe scale, jump into orbit, eat the Moon, cross a compressed solar system, consume planets, asteroid belts, the Sun, and nearby star systems until the galaxy comes into view.
 - Avoid larger rival T-Rex enemies. They can eat you if they are big enough.
 - Multiplayer is on by default for everyone connected to the same running host.
   Players in the same world phase can see, identify, and eat each other.
-- Use the spawn cheat to add more food and grow faster.
 
 ## Controls
 
@@ -23,17 +23,6 @@ The idea started as a silly grow-forever game: begin as a tiny T-Rex, eat smalle
 - Touch right stick: rotate/tilt camera
 - Mouse wheel: zoom camera
 - Right-click drag: rotate/tilt camera
-- Number keys or numpad:
-  - `1` = 2x spawns
-  - `2` = 4x spawns
-  - `3` = 6x spawns
-  - `4` = 8x spawns
-  - `5` = 10x spawns
-  - `6` = 12x spawns
-  - `7` = 14x spawns
-  - `8` = 16x spawns
-  - `9` = 18x spawns
-  - `0` = 20x spawns
 
 ## Development
 

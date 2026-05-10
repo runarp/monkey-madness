@@ -4,6 +4,7 @@ import { Pause, Play, RotateCcw, Save, Trophy } from 'lucide-react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { GLOBE_BOARD_DEFINITION, GROUND_BOARD_DEFINITIONS, GROUND_BOARD_ENTRY_POINTS, GROUND_BOARD_LABELS } from './boards.js';
 
 const COUNTRY_SIZE = 1800;
 const HALF_COUNTRY = COUNTRY_SIZE / 2;
@@ -11,11 +12,9 @@ const MAX_LOGICAL_SIZE = 1e24;
 const MAX_VISUAL_SIZE = 820;
 const MIN_LOGICAL_SIZE = 0.04;
 const START_SIZE = 0.35;
-const BASE_ENTITY_COUNT = 92;
-const DEFAULT_SPAWN_MULTIPLIER = 2;
-const MAX_SPAWN_MULTIPLIER = 20;
 const MAX_RIVAL_REX_COUNT = 6;
 const MAX_SCENERY_EATS_PER_FRAME = 1;
+const RIVALS_CONSUME_BOARD_ITEMS = false;
 const ENTITY_GROWTH_CAP_RATIO = 0.045;
 const SCENERY_GROWTH_CAP_RATIO = 0.045;
 const SPAWN_EDIBLE_SIZE_RATIO = 0.9;
@@ -156,17 +155,6 @@ const createUniqueId = () => {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${uniqueIdCounter.toString(36)}`;
 };
 
-const getSpawnMultiplierFromKeyCode = (code) => {
-  const match = /^(?:Numpad|Digit)(\d)$/.exec(code);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return value === 0 ? MAX_SPAWN_MULTIPLIER : value * 2;
-};
-
-const getSpawnMultiplier = (value) => clamp(Math.round(safeNumber(value, DEFAULT_SPAWN_MULTIPLIER)), DEFAULT_SPAWN_MULTIPLIER, MAX_SPAWN_MULTIPLIER);
-
-const getTargetEntityCount = (spawnMultiplier = DEFAULT_SPAWN_MULTIPLIER) => Math.round(BASE_ENTITY_COUNT * getSpawnMultiplier(spawnMultiplier));
-
 const getVisualSize = (size) => {
   const safeSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(size));
   if (safeSize <= 60) return safeSize;
@@ -208,6 +196,12 @@ const getWorldPhase = (size) => {
 };
 
 const getPhaseLabel = (phase) => WORLD_PHASES[clamp(phase, 0, MAX_WORLD_PHASE)]?.label ?? 'Globe';
+
+const getBoardLabel = (phase) => {
+  const safePhase = clamp(phase, 0, MAX_WORLD_PHASE);
+  if (safePhase <= GLOBE_PHASE) return GROUND_BOARD_LABELS[safePhase] ?? getPhaseLabel(safePhase);
+  return getPhaseLabel(safePhase);
+};
 
 const getTileSeed = (tx, tz) => tx * 1009 + tz * 917 + 13;
 
@@ -294,6 +288,7 @@ const getSceneryEatCooldown = (kind, playerSize) => {
 
 const getPlayerEatCooldown = (kind, playerSize) => {
   const baseCooldown = {
+    grass: 0.05,
     ant: 0.06,
     worm: 0.07,
     flower: 0.08,
@@ -326,6 +321,7 @@ const getPlayerEatCooldown = (kind, playerSize) => {
 
 const getEatScore = (kind, targetSize, eaterSize, growth = 0) => {
   const kindBonus = {
+    grass: 3,
     ant: 4,
     worm: 5,
     flower: 6,
@@ -376,16 +372,28 @@ const getSceneryGrowth = (object, playerSize) => {
 
 const getEntityGrowth = (entity, eaterSize) => {
   const safeEaterSize = Math.max(MIN_LOGICAL_SIZE, safeNumber(eaterSize));
-  const multiplier = ['ant', 'worm'].includes(entity.kind) ? 0.42 : ['flower', 'brush', 'signpost'].includes(entity.kind) ? 0.34 : 0.24;
-  const rawGrowth = Math.max(0.006, entity.size * multiplier);
-  return Math.min(rawGrowth, Math.max(0.014, safeEaterSize * getGrowthCapRatio(safeEaterSize)));
+  const multiplier = {
+    grass: 0.1,
+    ant: 0.14,
+    worm: 0.16,
+    flower: 0.13,
+    brush: 0.16,
+    signpost: 0.18,
+    banana: 0.21,
+    sapling: 0.21,
+    monkey: 0.22,
+  }[entity.kind] ?? 0.2;
+  const abundant = ['grass', 'ant', 'worm', 'flower', 'brush'].includes(entity.kind);
+  const rawGrowth = Math.max(abundant ? 0.002 : 0.006, entity.size * multiplier);
+  const capRatio = getGrowthCapRatio(safeEaterSize) * (abundant ? 0.68 : 1);
+  return Math.min(rawGrowth, Math.max(abundant ? 0.003 : 0.014, safeEaterSize * capRatio));
 };
 
 const getRivalMoveSpeed = (size, phase = 0) => getMoveSpeed(size, phase) * (0.58 + clamp(phase, 0, GLOBE_PHASE) * 0.035);
 
 const getRivalThreat = (rivalSize, playerSize) => Math.max(0, safeNumber(rivalSize) / Math.max(MIN_LOGICAL_SIZE, safeNumber(playerSize)) - 1);
 
-const getRivalCountForPhase = (phase) => (phase >= GLOBE_PHASE ? 0 : Math.min(3, MAX_RIVAL_REX_COUNT));
+const getRivalCountForPhase = (phase) => (phase >= GLOBE_PHASE ? 0 : Math.min(1, MAX_RIVAL_REX_COUNT));
 
 const formatMagnitude = (value, digits = 2) => {
   const safeValue = Math.max(0, safeNumber(value, 0));
@@ -904,6 +912,7 @@ const pickEntityDefinition = (playerSize) => {
 
 const getEntityBaseRadius = (entity) => {
   const radiusByKind = {
+    grass: 0.1,
     ant: 0.08,
     worm: 0.12,
     flower: 0.16,
@@ -979,25 +988,7 @@ const placedEntity = (kind, x, z, size, idPrefix = 'starter-') => ({
 
 const initialEntities = (phase = 0, playerSize = WORLD_PHASES[phase]?.minSize ?? START_SIZE) => {
   if (phase >= ORBIT_PHASE) return [];
-
-  const origin = new THREE.Vector3(0, 0, 0);
-  const entities =
-    phase === 0
-      ? [
-          placedEntity('ant', 0, -8, 0.08),
-          placedEntity('ant', 0, -13, 0.08),
-          placedEntity('worm', -8, -15, 0.12),
-          placedEntity('worm', 7, -18, 0.12),
-          placedEntity('flower', 11, -23, 0.2),
-          placedEntity('brush', 24, -34, 0.3),
-        ]
-      : [];
-
-  for (let i = entities.length; i < 66; i += 1) {
-    entities.push(makeEntity(pickEntityDefinition(playerSize), origin, Math.max(START_SIZE, playerSize), 'initial-', getWorldLimit(phase), phase));
-  }
-
-  return entities;
+  return createBoardEntities(phase, playerSize);
 };
 
 const makeRivalRex = (index, playerPosition, playerSize, phase) => {
@@ -1006,7 +997,7 @@ const makeRivalRex = (index, playerPosition, playerSize, phase) => {
   const visualSize = getVisualSize(playerSize);
   const minRadius = Math.max(260, visualSize * 8.5);
   const maxRadius = Math.max(minRadius + 220, visualSize * 13.5);
-  const seed = performance.now() * 0.001 + index * 719 + safePlayerSize * 3.1 + safePhase * 101;
+  const seed = 9100 + index * 719 + Math.round(safePlayerSize * 10) * 3.1 + safePhase * 101;
   const sizeBand = [0.52, 0.64, 0.76, 0.84, 0.9, 0.7][index % 6];
   const minSpawnSize = Math.max(START_SIZE * 0.62, safePlayerSize * 0.42);
   const maxSpawnSize = Math.max(START_SIZE * 0.82, safePlayerSize * 0.92);
@@ -1195,6 +1186,330 @@ const makeTankObject = (id, x, z, seed, tier = 1) => ({
   angle: seeded(seed + 2) * Math.PI * 2,
 });
 
+const getBoardEntryPoint = (phase) => GROUND_BOARD_ENTRY_POINTS[clamp(phase, 0, GLOBE_PHASE)] ?? GROUND_BOARD_ENTRY_POINTS[0];
+
+const getBoardEntryPosition = (phase) => {
+  const safePhase = clamp(phase, 0, MAX_WORLD_PHASE);
+  if (safePhase >= ORBIT_PHASE) return getSpaceEntryPosition();
+  const entry = getBoardEntryPoint(safePhase);
+  return new THREE.Vector3(entry.x, 0, entry.z);
+};
+
+const getBoardEntryHeading = (phase) => {
+  const safePhase = clamp(phase, 0, MAX_WORLD_PHASE);
+  if (safePhase >= ORBIT_PHASE) return Math.PI / 2;
+  return getBoardEntryPoint(safePhase).heading;
+};
+
+const findBoardLandPosition = (phase, x, z, seed, avoidStartKeepout = false) => {
+  if (phase >= GLOBE_PHASE) return { x, z };
+
+  const constrained = constrainToWorld(x, z, phase);
+  const blocked = avoidStartKeepout && isStartCameraKeepout(constrained.x, constrained.z, 0, 0);
+  if (!blocked && isLandInPhase(constrained.x, constrained.z, phase)) return constrained;
+
+  for (let attempt = 0; attempt < 28; attempt += 1) {
+    const radius = 24 + attempt * 24;
+    const angle = seeded(seed + attempt * 37) * Math.PI * 2;
+    const candidate = constrainToWorld(constrained.x + Math.cos(angle) * radius, constrained.z + Math.sin(angle) * radius, phase);
+    if (avoidStartKeepout && isStartCameraKeepout(candidate.x, candidate.z, 0, 0)) continue;
+    if (isLandInPhase(candidate.x, candidate.z, phase)) return candidate;
+  }
+
+  return null;
+};
+
+const addBoardEntity = (items, phase, spec) => {
+  const index = items.length;
+  const seed = spec.seed ?? phase * 10000 + index * 97 + 11;
+  const position = findBoardLandPosition(phase, spec.x, spec.z, seed, false);
+  if (!position) return;
+  const kind = spec.kind;
+  const size = Math.max(MIN_LOGICAL_SIZE, safeNumber(spec.size, START_SIZE));
+
+  items.push({
+    id: `board:${phase}:entity:${index}:${kind}`,
+    kind,
+    size,
+    baseSize: size,
+    position: new THREE.Vector3(position.x, 0, position.z),
+    angle: safeNumber(spec.angle, seeded(seed + 5) * Math.PI * 2),
+    speed: MOVING_ENTITY_KINDS.has(kind) ? safeNumber(spec.speed, 0.1 + seeded(seed + 17) * 0.22) : 0,
+    pulse: seeded(seed + 29) * Math.PI * 2,
+  });
+};
+
+const appendBoardEntityLine = (items, phase, { kind, size, count, from, to, jitter = 0, sizeStep = 0, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 53;
+    addBoardEntity(items, phase, {
+      kind,
+      size: size + i * sizeStep,
+      x: from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * jitter,
+      z: from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * jitter,
+      seed: itemSeed,
+    });
+  }
+};
+
+const appendBoardEntityCluster = (items, phase, { kind, size, count, center, radius, jitter = 0, sizeStep = 0, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const itemSeed = seed + i * 67;
+    const angle = seeded(itemSeed + 5) * Math.PI * 2;
+    const distance = Math.sqrt(seeded(itemSeed + 11)) * radius;
+    addBoardEntity(items, phase, {
+      kind,
+      size: size + i * sizeStep,
+      x: center[0] + Math.cos(angle) * distance + (seeded(itemSeed + 17) - 0.5) * jitter,
+      z: center[1] + Math.sin(angle) * distance + (seeded(itemSeed + 23) - 0.5) * jitter,
+      seed: itemSeed,
+    });
+  }
+};
+
+const appendBoardEntityGrid = (items, phase, { kind, size, rows, cols, center, spacingX, spacingZ, jitter = 0, sizeStep = 0, seed = 1 }) => {
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = row * cols + col;
+      const itemSeed = seed + index * 41;
+      addBoardEntity(items, phase, {
+        kind,
+        size: size + index * sizeStep,
+        x: center[0] + (col - (cols - 1) / 2) * spacingX + (seeded(itemSeed + 3) - 0.5) * jitter,
+        z: center[1] + (row - (rows - 1) / 2) * spacingZ + (seeded(itemSeed + 7) - 0.5) * jitter,
+        seed: itemSeed,
+      });
+    }
+  }
+};
+
+const getGroundBoardDefinition = (phase) => GROUND_BOARD_DEFINITIONS[clamp(phase, 0, GROUND_BOARD_DEFINITIONS.length - 1)] ?? null;
+
+const appendBoardEntityOperation = (items, phase, operation) => {
+  if (operation.type === 'entity') {
+    addBoardEntity(items, phase, operation);
+  } else if (operation.type === 'line') {
+    appendBoardEntityLine(items, phase, operation);
+  } else if (operation.type === 'cluster') {
+    appendBoardEntityCluster(items, phase, operation);
+  } else if (operation.type === 'grid') {
+    appendBoardEntityGrid(items, phase, operation);
+  }
+};
+
+const createBoardEntities = (phase) => {
+  if (phase >= GLOBE_PHASE) return [];
+
+  const board = getGroundBoardDefinition(phase);
+  if (!board) return [];
+
+  const items = [];
+  for (const operation of board.entities ?? []) {
+    appendBoardEntityOperation(items, phase, operation);
+  }
+  return items;
+};
+
+const addBoardSceneryObject = (items, phase, x, z, seed, factory) => {
+  const position = findBoardLandPosition(phase, x, z, seed, true);
+  if (!position) return;
+  items.push(factory(`board:${phase}:scenery:${items.length}`, position.x, position.z, seed));
+};
+
+const appendTreeLine = (items, phase, { from, to, count, scaleMin = 0.45, scaleMax = 0.95, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 43;
+    const x = from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * 24;
+    const z = from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * 24;
+    const scale = scaleMin + seeded(itemSeed + 11) * (scaleMax - scaleMin);
+    addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeTreeObject(id, px, pz, scale, s));
+  }
+};
+
+const appendTreeCluster = (items, phase, { center, count, radius, scaleMin = 0.45, scaleMax = 1, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const itemSeed = seed + i * 47;
+    const angle = seeded(itemSeed + 5) * Math.PI * 2;
+    const distance = Math.sqrt(seeded(itemSeed + 13)) * radius;
+    const scale = scaleMin + seeded(itemSeed + 19) * (scaleMax - scaleMin);
+    addBoardSceneryObject(items, phase, center[0] + Math.cos(angle) * distance, center[1] + Math.sin(angle) * distance, itemSeed, (id, px, pz, s) =>
+      makeTreeObject(id, px, pz, scale, s),
+    );
+  }
+};
+
+const appendHouseGrid = (items, phase, { center, rows, cols, spacingX = 42, spacingZ = 40, seed = 1 }) => {
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = row * cols + col;
+      const itemSeed = seed + index * 59;
+      const x = center[0] + (col - (cols - 1) / 2) * spacingX + (seeded(itemSeed + 3) - 0.5) * 10;
+      const z = center[1] + (row - (rows - 1) / 2) * spacingZ + (seeded(itemSeed + 7) - 0.5) * 10;
+      addBoardSceneryObject(items, phase, x, z, itemSeed, makeHouseObject);
+    }
+  }
+};
+
+const appendCarLine = (items, phase, { from, to, count, tierMin = 0.85, tierMax = 1.2, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 37;
+    const x = from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * 18;
+    const z = from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * 18;
+    const tier = tierMin + seeded(itemSeed + 11) * (tierMax - tierMin);
+    addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeCarObject(id, px, pz, s, tier));
+  }
+};
+
+const appendBuildingGrid = (items, phase, { center, rows, cols, spacingX = 54, spacingZ = 54, tierMin = 0.85, tierMax = 1.5, seed = 1 }) => {
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = row * cols + col;
+      const itemSeed = seed + index * 71;
+      const x = center[0] + (col - (cols - 1) / 2) * spacingX + (seeded(itemSeed + 3) - 0.5) * 12;
+      const z = center[1] + (row - (rows - 1) / 2) * spacingZ + (seeded(itemSeed + 7) - 0.5) * 12;
+      const tier = tierMin + seeded(itemSeed + 11) * (tierMax - tierMin);
+      addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeBuildingObject(id, px, pz, s, tier));
+    }
+  }
+};
+
+const appendTowerLine = (items, phase, { from, to, count, tierMin = 0.9, tierMax = 1.8, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 61;
+    const x = from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * 18;
+    const z = from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * 18;
+    const tier = tierMin + seeded(itemSeed + 11) * (tierMax - tierMin);
+    addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeTowerObject(id, px, pz, s, tier));
+  }
+};
+
+const appendTankLine = (items, phase, { from, to, count, tierMin = 0.9, tierMax = 1.4, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 67;
+    const x = from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * 20;
+    const z = from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * 20;
+    const tier = tierMin + seeded(itemSeed + 11) * (tierMax - tierMin);
+    addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeTankObject(id, px, pz, s, tier));
+  }
+};
+
+const appendMountainLine = (items, phase, { from, to, count, radiusMin, radiusMax, heightMin, heightMax, seed = 1 }) => {
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const itemSeed = seed + i * 79;
+    const x = from[0] + (to[0] - from[0]) * t + (seeded(itemSeed + 3) - 0.5) * 80;
+    const z = from[1] + (to[1] - from[1]) * t + (seeded(itemSeed + 7) - 0.5) * 80;
+    const radius = radiusMin + seeded(itemSeed + 11) * (radiusMax - radiusMin);
+    const height = heightMin + seeded(itemSeed + 17) * (heightMax - heightMin);
+    addBoardSceneryObject(items, phase, x, z, itemSeed, (id, px, pz, s) => makeMountainObject(id, px, pz, radius, height, s));
+  }
+};
+
+const findGlobeClusterPosition = (centerX, centerZ, seed, radius) => {
+  if (isGlobeLandAt(centerX, centerZ)) return { x: centerX, z: centerZ };
+
+  for (let attempt = 0; attempt < 28; attempt += 1) {
+    const angle = seeded(seed + attempt * 13) * Math.PI * 2;
+    const distance = Math.sqrt(seeded(seed + attempt * 23)) * radius;
+    const x = centerX + Math.cos(angle) * distance;
+    const z = centerZ + Math.sin(angle) * distance;
+    if (Math.hypot(x, z) <= GLOBE_SCENERY_RADIUS_LIMIT && isGlobeLandAt(x, z)) return { x, z };
+  }
+
+  return findGlobeLandPosition(seed, GLOBE_RADIUS * 0.08, GLOBE_SCENERY_RADIUS_LIMIT);
+};
+
+const createGlobeBoardScenery = () => {
+  const items = [];
+  const { cities = [], ranges = [] } = GLOBE_BOARD_DEFINITION;
+
+  cities.forEach((city, cityIndex) => {
+    for (let i = 0; i < 9; i += 1) {
+      const seed = city.seed + i * 47;
+      const x = city.x + ((i % 3) - 1) * 155 + (seeded(seed + 3) - 0.5) * 42;
+      const z = city.z + (Math.floor(i / 3) - 1) * 145 + (seeded(seed + 7) - 0.5) * 42;
+      const position = findGlobeClusterPosition(x, z, seed, 420);
+      items.push(makeBuildingObject(`globe-board:building:${cityIndex}:${i}`, position.x, position.z, seed, 1.25 + seeded(seed + 11) * 0.75));
+    }
+
+    for (let i = 0; i < 4; i += 1) {
+      const seed = city.seed + 600 + i * 59;
+      const x = city.x + Math.cos(i * Math.PI * 0.5) * 310;
+      const z = city.z + Math.sin(i * Math.PI * 0.5) * 310;
+      const position = findGlobeClusterPosition(x, z, seed, 460);
+      items.push(makeTowerObject(`globe-board:tower:${cityIndex}:${i}`, position.x, position.z, seed, 1.2 + seeded(seed + 13) * 0.58));
+    }
+
+    for (let i = 0; i < 7; i += 1) {
+      const seed = city.seed + 1000 + i * 43;
+      const angle = seeded(seed + 5) * Math.PI * 2;
+      const distance = 360 + seeded(seed + 9) * 380;
+      const position = findGlobeClusterPosition(city.x + Math.cos(angle) * distance, city.z + Math.sin(angle) * distance, seed, 520);
+      items.push(makeHouseObject(`globe-board:house:${cityIndex}:${i}`, position.x, position.z, seed));
+    }
+
+    for (let i = 0; i < 8; i += 1) {
+      const seed = city.seed + 1300 + i * 53;
+      const angle = seeded(seed + 5) * Math.PI * 2;
+      const distance = 520 + seeded(seed + 9) * 520;
+      const position = findGlobeClusterPosition(city.x + Math.cos(angle) * distance, city.z + Math.sin(angle) * distance, seed, 620);
+      items.push(makeTreeObject(`globe-board:tree:${cityIndex}:${i}`, position.x, position.z, 1.2 + seeded(seed + 17) * 1.5, seed));
+    }
+  });
+
+  ranges.forEach((range, rangeIndex) => {
+    for (let i = 0; i < 14; i += 1) {
+      const t = i / 13;
+      const seed = range.seed + i * 83;
+      const x = range.from[0] + (range.to[0] - range.from[0]) * t + (seeded(seed + 3) - 0.5) * 520;
+      const z = range.from[1] + (range.to[1] - range.from[1]) * t + (seeded(seed + 7) - 0.5) * 520;
+      const position = findGlobeClusterPosition(x, z, seed, 680);
+      items.push(makeGlobeMountainObject(`globe-board:mountain:${rangeIndex}:${i}`, position.x, position.z, seed));
+    }
+  });
+
+  return items;
+};
+
+const appendBoardSceneryOperation = (items, phase, operation) => {
+  if (operation.type === 'treeLine') {
+    appendTreeLine(items, phase, operation);
+  } else if (operation.type === 'treeCluster') {
+    appendTreeCluster(items, phase, operation);
+  } else if (operation.type === 'houseGrid') {
+    appendHouseGrid(items, phase, operation);
+  } else if (operation.type === 'carLine') {
+    appendCarLine(items, phase, operation);
+  } else if (operation.type === 'buildingGrid') {
+    appendBuildingGrid(items, phase, operation);
+  } else if (operation.type === 'towerLine') {
+    appendTowerLine(items, phase, operation);
+  } else if (operation.type === 'tankLine') {
+    appendTankLine(items, phase, operation);
+  } else if (operation.type === 'mountainLine') {
+    appendMountainLine(items, phase, operation);
+  }
+};
+
+const createBoardScenery = (phase) => {
+  if (phase >= ORBIT_PHASE) return [];
+  if (phase === GLOBE_PHASE) return createGlobeBoardScenery();
+
+  const board = getGroundBoardDefinition(phase);
+  if (!board) return [];
+
+  const items = [];
+  for (const operation of board.scenery ?? []) {
+    appendBoardSceneryOperation(items, phase, operation);
+  }
+  return items;
+};
+
 const createSceneryForTile = (tile) => {
   const { tx, tz, offsetX, offsetZ, tileSeed = getTileSeed(tx, tz) } = tile;
   const tileDistance = Math.abs(tx) + Math.abs(tz);
@@ -1311,7 +1626,7 @@ const createSceneryForTile = (tile) => {
 
 const createSceneryForPhase = (phase) => {
   if (phase >= ORBIT_PHASE) return [];
-  return phase === GLOBE_PHASE ? createGlobeScenery() : getTilesForPhase(phase).flatMap(createSceneryForTile);
+  return createBoardScenery(phase);
 };
 
 const getOrbitDistanceFromAu = (au, orbitScale = 1) => (au <= 0 ? 0 : EARTH_ORBIT_DISTANCE * orbitScale * Math.pow(au, 0.55));
@@ -1658,12 +1973,6 @@ function useKeyboardInput(inputRef) {
         event.preventDefault();
       }
 
-      const spawnMultiplier = getSpawnMultiplierFromKeyCode(event.code);
-      if (spawnMultiplier !== null) {
-        inputRef.current.spawnMultiplier = spawnMultiplier;
-        inputRef.current.spawnCheatChangedAt = performance.now();
-        event.preventDefault();
-      }
     };
 
     const onKeyUp = (event) => {
@@ -1735,7 +2044,7 @@ function HUD({ stats, isPaused, onPauseToggle, onReset }) {
           <strong>{stats.players}</strong>
         </div>
         <div>
-          <span>Spawns</span>
+          <span>Board</span>
           <strong>{stats.spawnDensity}</strong>
         </div>
         <div>
@@ -1904,8 +2213,37 @@ function Terrain({ offsetX = 0, offsetZ = 0, tileSeed = 0 }) {
   );
 }
 
-function RoadsAndFields({ offsetX = 0, offsetZ = 0, tileSeed = 0, showBorder = false }) {
+function RoadsAndFields({ phase = 0, offsetX = 0, offsetZ = 0, tileSeed = 0, showBorder = false }) {
+  const board = phase < GLOBE_PHASE ? getGroundBoardDefinition(phase) : null;
+  const hasAuthoredGround = Boolean(board?.roads?.length || board?.patches?.length);
   const roads = useMemo(() => {
+    if (hasAuthoredGround) {
+      return (board.roads ?? [])
+        .map((road, index) => {
+          const from = road.from;
+          const to = road.to;
+          const center = road.center ?? (from && to ? [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2] : null);
+          if (!center) return null;
+          if (Math.abs(center[0] - offsetX) > HALF_COUNTRY || Math.abs(center[1] - offsetZ) > HALF_COUNTRY) return null;
+
+          const dx = from && to ? to[0] - from[0] : Math.cos(road.angle ?? 0) * safeNumber(road.length, 0);
+          const dz = from && to ? to[1] - from[1] : Math.sin(road.angle ?? 0) * safeNumber(road.length, 0);
+          const length = from && to ? Math.hypot(dx, dz) : safeNumber(road.length, 100);
+
+          return {
+            id: road.id ?? `authored-road-${index}`,
+            length,
+            width: safeNumber(road.width, 14),
+            centerX: center[0],
+            centerZ: center[1],
+            angle: from && to ? Math.atan2(dz, dx) : safeNumber(road.angle, 0),
+            color: road.color ?? '#d7bb78',
+            lift: road.lift ?? 0.16,
+          };
+        })
+        .filter(Boolean);
+    }
+
     const centerTile = offsetX === 0 && offsetZ === 0;
     if (centerTile) {
       return [
@@ -1937,8 +2275,28 @@ function RoadsAndFields({ offsetX = 0, offsetZ = 0, tileSeed = 0, showBorder = f
         color: '#cfae70',
       },
     ];
-  }, [offsetX, offsetZ, tileSeed]);
+  }, [board, hasAuthoredGround, offsetX, offsetZ, phase, tileSeed]);
   const fields = useMemo(() => {
+    if (hasAuthoredGround) {
+      return (board.patches ?? [])
+        .map((patch, index) => {
+          const center = patch.center;
+          if (!center) return null;
+          if (Math.abs(center[0] - offsetX) > HALF_COUNTRY || Math.abs(center[1] - offsetZ) > HALF_COUNTRY) return null;
+
+          return {
+            id: patch.id ?? `authored-patch-${index}`,
+            x: center[0],
+            z: center[1],
+            w: safeNumber(patch.width, 80),
+            h: safeNumber(patch.depth, 60),
+            angle: safeNumber(patch.angle, 0),
+            color: patch.color ?? '#6e9f46',
+          };
+        })
+        .filter(Boolean);
+    }
+
     const list = [];
     for (let row = -2; row <= 2; row += 1) {
       for (let col = -2; col <= 2; col += 1) {
@@ -1957,7 +2315,7 @@ function RoadsAndFields({ offsetX = 0, offsetZ = 0, tileSeed = 0, showBorder = f
       }
     }
     return list;
-  }, [offsetX, offsetZ, tileSeed]);
+  }, [board, hasAuthoredGround, offsetX, offsetZ, tileSeed]);
 
   return (
     <group>
@@ -1972,7 +2330,7 @@ function RoadsAndFields({ offsetX = 0, offsetZ = 0, tileSeed = 0, showBorder = f
           depth={field.h}
           centerX={field.x}
           centerZ={field.z}
-          angle={seeded(field.x + field.z) * Math.PI}
+          angle={field.angle ?? seeded(field.x + field.z) * Math.PI}
           color={field.color}
         />
       ))}
@@ -2362,6 +2720,19 @@ function Banana({ entityRef, playerSize }) {
 function TinyEntityModel({ entity, playerSize }) {
   const scale = getEntityRenderScale(entity, playerSize);
   const phase = entity.pulse ?? 0;
+
+  if (entity.kind === 'grass') {
+    return (
+      <group scale={scale}>
+        {[-0.16, -0.05, 0.07, 0.18].map((x, index) => (
+          <mesh key={index} position={[x, 0.2 + index * 0.025, Math.sin(index) * 0.05]} rotation={[0.18 + index * 0.08, 0, -0.22 + index * 0.13]} castShadow>
+            <coneGeometry args={[0.035, 0.58 + index * 0.08, 5]} />
+            <meshStandardMaterial color={index % 2 ? '#5fa53d' : '#73b84a'} roughness={0.92} />
+          </mesh>
+        ))}
+      </group>
+    );
+  }
 
   if (entity.kind === 'ant') {
     return (
@@ -3762,7 +4133,7 @@ function WorldTiles({ phase, won }) {
       {tiles.map((tile) => (
         <group key={tile.id}>
           <Terrain offsetX={tile.offsetX} offsetZ={tile.offsetZ} tileSeed={tile.tileSeed} />
-          <RoadsAndFields offsetX={tile.offsetX} offsetZ={tile.offsetZ} tileSeed={tile.tileSeed} showBorder={phase === 0} />
+          <RoadsAndFields phase={phase} offsetX={tile.offsetX} offsetZ={tile.offsetZ} tileSeed={tile.tileSeed} showBorder={phase === 0} />
         </group>
       ))}
     </group>
@@ -3845,7 +4216,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         objects: player.objects,
         rivals: rivalsRef.current.length,
         players: visibleRemotePlayers + 1,
-        spawnDensity: `${getSpawnMultiplier(inputRef.current.spawnMultiplier)}x`,
+        spawnDensity: getBoardLabel(worldPhaseRef.current),
         world: getPhaseLabel(phase),
         spaceMode: inSpace,
         speed: `${formatMagnitude(safeNumber(player.currentSpeed, 0), 1)}/s`,
@@ -4040,19 +4411,6 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     [multiplayerPlayerId, publishMultiplayerState, publishStats],
   );
 
-  const refillEntities = useCallback(() => {
-    if (worldPhaseRef.current >= ORBIT_PHASE) return;
-
-    const entities = entitiesRef.current;
-    const player = playerRef.current;
-    const worldLimit = getWorldLimit(worldPhaseRef.current);
-    const targetEntityCount = getTargetEntityCount(inputRef.current.spawnMultiplier);
-
-    while (entities.length < targetEntityCount) {
-      entities.push(makeEntity(pickEntityDefinition(player.size), player.position, player.size, '', worldLimit, worldPhaseRef.current));
-    }
-  }, [inputRef]);
-
   const ensureSceneryForPhase = useCallback((phase) => {
     const existingIds = new Set(sceneryRef.current.map((item) => item.id));
     const additions = createSceneryForPhase(phase).filter((item) => !existingIds.has(item.id));
@@ -4093,11 +4451,11 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
     const startPhase = getWorldPhase(requestedStartSize);
     multiplayerSpawnTokenRef.current = createUniqueId();
     pendingEatClaimsRef.current.clear();
-    const startPosition = startPhase >= ORBIT_PHASE ? getSpaceEntryPosition() : new THREE.Vector3(0, 0, 0);
+    const startPosition = getBoardEntryPosition(startPhase);
     playerRef.current = {
       position: startPosition,
       size: requestedStartSize,
-      heading: 0,
+      heading: getBoardEntryHeading(startPhase),
       bananas: 0,
       monkeys: 0,
       objects: 0,
@@ -4203,19 +4561,27 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       worldPhaseRef.current = activePhase;
       if (activePhase >= ORBIT_PHASE) {
         if (previousPhase < ORBIT_PHASE) {
-          player.position.copy(getSpaceEntryPosition());
-          player.heading = Math.PI / 2;
+          player.position.copy(getBoardEntryPosition(activePhase));
+          player.heading = getBoardEntryHeading(activePhase);
           entitiesRef.current = [];
           sceneryRef.current = [];
           rivalsRef.current = [];
+          entityObjectRefs.current.clear();
           setEntitiesVersion((value) => value + 1);
           setSceneryVersion((value) => value + 1);
           setRivalsVersion((value) => value + 1);
         }
         ensureSpaceBodiesForPhase(activePhase);
       } else {
-        ensureSceneryForPhase(activePhase);
-        ensureRivalsForPhase(activePhase);
+        player.position.copy(getBoardEntryPosition(activePhase));
+        player.heading = getBoardEntryHeading(activePhase);
+        entitiesRef.current = initialEntities(activePhase, player.size);
+        sceneryRef.current = createSceneryForPhase(activePhase);
+        rivalsRef.current = initialRivals(player.size, activePhase);
+        entityObjectRefs.current.clear();
+        setEntitiesVersion((value) => value + 1);
+        setSceneryVersion((value) => value + 1);
+        setRivalsVersion((value) => value + 1);
       }
       setWorldPhase(activePhase);
       publishStats(true);
@@ -4227,20 +4593,9 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       publishStats(true);
     }
 
-    const targetEntityCount = getTargetEntityCount(inputRef.current.spawnMultiplier);
     if (worldPhaseRef.current >= ORBIT_PHASE) {
       if (entitiesRef.current.length > 0) {
         entitiesRef.current = [];
-        setEntitiesVersion((value) => value + 1);
-        publishStats(true);
-      }
-    } else {
-      if (!player.lost && entitiesRef.current.length < targetEntityCount) {
-        refillEntities();
-        setEntitiesVersion((value) => value + 1);
-        publishStats(true);
-      } else if (entitiesRef.current.length > targetEntityCount * 1.08) {
-        entitiesRef.current = entitiesRef.current.slice(0, targetEntityCount);
         setEntitiesVersion((value) => value + 1);
         publishStats(true);
       }
@@ -4364,7 +4719,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
             }
           }
 
-          if (!hasTarget) {
+          if (RIVALS_CONSUME_BOARD_ITEMS && !hasTarget) {
             let bestTarget = null;
             let bestScore = Infinity;
 
@@ -4435,7 +4790,7 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
             }
           }
 
-          if ((rival.eatCooldown ?? 0) <= 0) {
+          if (RIVALS_CONSUME_BOARD_ITEMS && (rival.eatCooldown ?? 0) <= 0) {
             const entityIndex = workingEntities.findIndex((entity) => {
               const edible = isEntityEdibleBy(entity, rival.size * 0.92);
               if (!edible) return false;
@@ -4720,11 +5075,10 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
       }
 
       entitiesRef.current = nextEntities;
+      if (entitiesChanged) {
+        setEntitiesVersion((value) => value + 1);
+      }
       if (ateSomething || entitiesChanged || sceneryChanged || spaceBodiesChanged || rivalsChanged) {
-        if (worldPhaseRef.current < ORBIT_PHASE) {
-          refillEntities();
-          setEntitiesVersion((value) => value + 1);
-        }
         setBurstsVersion((value) => value + 1);
         publishStats(true);
       } else {
@@ -4806,8 +5160,11 @@ function GameScene({ inputRef, pausedRef, resetToken, startSize, playerName, pla
         edibleSpaceBodies: spaceBodiesRef.current.filter((body) => isSpaceBodyEdibleBy(body, player.size)).length,
         systems: safeNumber(player.systems, 0),
         entityCount: entitiesRef.current.length,
-        targetEntityCount: getTargetEntityCount(inputRef.current.spawnMultiplier),
-        spawnMultiplier: getSpawnMultiplier(inputRef.current.spawnMultiplier),
+        board: getBoardLabel(worldPhaseRef.current),
+        boardTargetCount:
+          worldPhaseRef.current >= ORBIT_PHASE
+            ? spaceBodiesRef.current.filter((body) => !body.decorative).length
+            : entitiesRef.current.length + sceneryRef.current.length,
         rivals: rivalsRef.current.length,
         largestRivalSize: rivalsRef.current.reduce((largest, rival) => Math.max(largest, rival.size), 0),
         lost: player.lost,
@@ -5042,8 +5399,6 @@ function App() {
   const inputRef = useRef({
     keyboard: new THREE.Vector2(),
     touch: new THREE.Vector2(),
-    spawnMultiplier: DEFAULT_SPAWN_MULTIPLIER,
-    spawnCheatChangedAt: 0,
     camera: {
       zoom: 1,
       yaw: 0,
@@ -5065,7 +5420,7 @@ function App() {
     objects: 0,
     rivals: 3,
     players: 1,
-    spawnDensity: `${DEFAULT_SPAWN_MULTIPLIER}x`,
+    spawnDensity: getBoardLabel(0),
     world: 'Country',
     spaceMode: false,
     speed: '0/s',
@@ -5129,8 +5484,6 @@ function App() {
     inputRef.current.keyboard.set(0, 0);
     inputRef.current.touch.set(0, 0);
     inputRef.current.camera.touch.set(0, 0);
-    inputRef.current.spawnMultiplier = DEFAULT_SPAWN_MULTIPLIER;
-    inputRef.current.spawnCheatChangedAt = 0;
     Object.assign(inputRef.current.camera, {
       zoom: 1,
       yaw: 0,
